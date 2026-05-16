@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Live Meeting Translator</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Mac Web App</p>
+          <h1>Live Meeting Translator</h1>
+        </div>
+        <div class="status-pill" id="statusPill" aria-live="polite">
+          <span class="status-dot"></span>
+          <span id="statusText">待機中</span>
+        </div>
+      </header>
+
+      <section class="controls" aria-label="Controls">
+        <label>
+          <span>音声</span>
+          <select id="sourceLang">
+            <option value="en-US">English (US)</option>
+            <option value="ja-JP">日本語</option>
+            <option value="en-GB">English (UK)</option>
+            <option value="ko-KR">한국어</option>
+            <option value="zh-CN">中文</option>
+            <option value="fr-FR">Français</option>
+            <option value="de-DE">Deutsch</option>
+            <option value="es-ES">Español</option>
+          </select>
+        </label>
+
+        <label>
+          <span>翻訳</span>
+          <select id="targetLang">
+            <option value="ja">日本語</option>
+            <option value="en">English</option>
+            <option value="ko">한국어</option>
+            <option value="zh">中文</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="es">Español</option>
+          </select>
+        </label>
+
+        <label>
+          <span>翻訳エンジン</span>
+          <select id="translatorMode">
+            <option value="realtime">OpenAI Realtime</option>
+            <option value="local">ローカル翻訳</option>
+            <option value="openai">OpenAI API</option>
+            <option value="browser">ブラウザ内蔵（実験）</option>
+            <option value="libre">LibreTranslate</option>
+            <option value="off">翻訳なし</option>
+          </select>
+        </label>
+
+        <div class="button-row">
+          <button class="primary" id="startBtn" type="button" title="Start">
+            <span aria-hidden="true">●</span>
+            開始
+          </button>
+          <button id="stopBtn" type="button" title="Stop" disabled>
+            <span aria-hidden="true">■</span>
+            停止
+          </button>
+          <button id="translateInputBtn" type="button" title="Translate typed text">入力を翻訳</button>
+        </div>
+      </section>
+
+      <section class="settings" id="libreSettings" hidden>
+        <label>
+          <span>LibreTranslate URL</span>
+          <input id="libreEndpoint" type="url" placeholder="http://localhost:5000/translate" />
+        </label>
+        <label>
+          <span>API Key</span>
+          <input id="libreKey" type="password" autocomplete="off" placeholder="任意" />
+        </label>
+      </section>
+
+      <section class="settings api-settings" id="apiSettings">
+        <label>
+          <span>API接続方式</span>
+          <select id="apiMode">
+            <option value="server">サーバー経由</option>
+            <option value="browser">ブラウザにAPIキーを保存</option>
+          </select>
+        </label>
+        <label id="browserKeyField" hidden>
+          <span>OpenAI API Key</span>
+          <input id="browserApiKey" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
+        <div class="button-row compact" id="browserKeyActions" hidden>
+          <button id="saveBrowserKeyBtn" type="button">保存</button>
+          <button id="clearBrowserKeyBtn" type="button">削除</button>
+        </div>
+      </section>
+
+      <section class="live-grid" aria-label="Live transcript">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>文字起こし</h2>
+            <div class="panel-actions">
+              <button id="copyTranscriptBtn" type="button">コピー</button>
+              <span id="sourceBadge">ja-JP</span>
+            </div>
+          </div>
+          <textarea class="live-text text-area" id="transcriptText" aria-live="polite" placeholder="ここに直接入力することもできます。音声認識の結果もここに追記されます。"></textarea>
+          <p class="interim" id="interimText"></p>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>文脈補正</h2>
+            <div class="panel-actions">
+              <button id="copyRefinedBtn" type="button">コピー</button>
+              <span>clean</span>
+            </div>
+          </div>
+          <textarea class="live-text text-area refined" id="refinedText" aria-live="polite" placeholder="文字起こしを文脈に沿って整えた文章がここに入ります。手で直してから翻訳することもできます。"></textarea>
+          <p class="interim" id="refineHint">この文章を翻訳に使います。</p>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>翻訳</h2>
+            <div class="panel-actions">
+              <button id="copyTranslationBtn" type="button">コピー</button>
+              <span id="targetBadge">en</span>
+            </div>
+          </div>
+          <textarea class="live-text text-area translated" id="translationText" aria-live="polite" readonly></textarea>
+          <p class="interim" id="translationHint">翻訳結果がここに表示されます。</p>
+        </article>
+      </section>
+
+      <section class="history-wrap">
+        <div class="history-head">
+          <div>
+            <h2>文ごとの履歴</h2>
+            <p>補正後の文章と訳文を見比べられます。</p>
+          </div>
+          <div class="button-row compact">
+            <button id="copyBtn" type="button" title="Copy">コピー</button>
+            <button id="downloadBtn" type="button" title="Download">保存</button>
+            <button id="clearBtn" type="button" title="Clear">クリア</button>
+          </div>
+        </div>
+        <ol class="history" id="historyList"></ol>
+      </section>
+
+      <aside class="setup-note">
+        <strong>Macで会議音声を拾う場合</strong>
+        <span>マイク入力ならそのまま使えます。ZoomやMeetの相手側音声も拾うには、BlackHoleなどの仮想オーディオを入力に選ぶ構成が必要です。翻訳は標準ではローカルサーバー経由で行います。</span>
+      </aside>
+    </main>
+
+    <template id="historyItemTemplate">
+      <li>
+        <time></time>
+        <div>
+          <p class="refined"><strong>補正</strong><span></span></p>
+          <p class="translation"><strong>訳文</strong><span></span></p>
+        </div>
+      </li>
+    </template>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
