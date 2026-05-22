@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Live Meeting Translator</title>
-    <link rel="stylesheet" href="./styles.css?v=20260522-7" />
+    <link rel="stylesheet" href="./styles.css?v=20260522-8" />
   </head>
   <body>
     <main class="app-shell">
@@ -177,7 +177,7 @@
         <div class="history-head">
           <div>
             <h2>文ごとの履歴</h2>
-            <p>補正後の文章と訳文を見比べられます。</p>
+            <p>文末・語数・時間で区切った補正文と訳文を見比べられます。</p>
           </div>
           <div class="button-row compact">
             <button id="copyBtn" type="button" title="Copy">コピー</button>
@@ -196,7 +196,10 @@
 
     <template id="historyItemTemplate">
       <li>
-        <time></time>
+        <div class="history-stamp">
+          <time></time>
+          <span class="segment-meta"></span>
+        </div>
         <div>
           <p class="refined"><strong>補正</strong><span></span></p>
           <p class="translation"><strong>訳文</strong><span></span></p>
@@ -204,6 +207,6 @@
       </li>
     </template>
 
-    <script src="./app.js?v=20260522-7" type="module"></script>
+    <script src="./app.js?v=20260522-8" type="module"></script>
   </body>
 </html>

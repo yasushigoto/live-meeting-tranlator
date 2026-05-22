@@ -364,9 +364,21 @@ label span {
   border-top: 1px solid var(--line);
 }
 
+.history-stamp {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+}
+
 .history time {
   color: var(--muted);
   font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.segment-meta {
+  color: var(--accent);
+  font-size: 0.72rem;
   font-weight: 800;
 }
 
@@ -394,6 +406,19 @@ label span {
 
 .history span {
   word-break: break-word;
+}
+
+.history li.short {
+  padding: 9px 12px;
+}
+
+.history li.short > div {
+  gap: 5px;
+}
+
+.history li.short .refined,
+.history li.short .translation {
+  line-height: 1.35;
 }
 
 .setup-note {

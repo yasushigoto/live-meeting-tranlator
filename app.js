@@ -3,6 +3,12 @@ const SILENCE_DELAY_MS = 1800;
 const SENTENCE_END_DELAY_MS = 450;
 const REALTIME_FRAGMENT_DELAY_MS = 10000;
 const MAX_BUFFER_MS = 15000;
+const HISTORY_SOFT_WORD_LIMIT = 24;
+const HISTORY_SOFT_CHAR_LIMIT = 120;
+const HISTORY_MIN_TIMED_WORDS = 7;
+const HISTORY_MIN_TIMED_CHARS = 34;
+const HISTORY_TIMED_FLUSH_MS = 6500;
+const HISTORY_HARD_FLUSH_MS = 12000;
 const CONTEXT_REVISE_MS = 10000;
 const CONTEXT_SEGMENT_LIMIT = 6;
 const OPENAI_AUDIO_CHUNK_MS = 2200;
@@ -379,7 +385,12 @@ function showPendingProcessingAfterStop() {
 
 function renderHistoryItem(segment) {
   const fragment = elements.itemTemplate.content.cloneNode(true);
+  const stats = getSegmentStats(segment.refined || segment.original || "");
+  const item = fragment.querySelector("li");
+  item.classList.toggle("short", stats.words <= 8 && stats.chars <= 48);
   fragment.querySelector("time").textContent = segment.time;
+  fragment.querySelector(".segment-meta").textContent =
+    stats.words > 1 ? `${stats.words} words` : `${stats.chars} chars`;
   fragment.querySelector(".refined span").textContent = segment.refined || "";
   const translationLabel = segment.pendingTranslation && segment.translation
     ? `${segment.translation}（補正後翻訳中...）`
@@ -412,11 +423,21 @@ function cleanRealtimeSegmentText(text) {
     .trim();
 }
 
+function getSegmentStats(text) {
+  const cleaned = cleanRealtimeSegmentText(text);
+  const words = cleaned.split(/\s+/).filter(Boolean).length;
+  const cjkChars = (cleaned.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || []).length;
+  const chars = cleaned.replace(/\s/g, "").length;
+  return {
+    words: words || Math.ceil(cjkChars / 2) || (chars ? 1 : 0),
+    chars,
+  };
+}
+
 function hasLongEnoughRealtimeBuffer(sourceText, translationText) {
-  const sourceWords = sourceText.split(/\s+/).filter(Boolean).length;
-  const textLength = sourceText.replace(/\s/g, "").length;
+  const stats = getSegmentStats(sourceText);
   const translationLength = translationText.replace(/\s/g, "").length;
-  return sourceWords >= 14 || textLength >= 80 || translationLength >= 60;
+  return stats.words >= HISTORY_SOFT_WORD_LIMIT || stats.chars >= HISTORY_SOFT_CHAR_LIMIT || translationLength >= 80;
 }
 
 function shouldFlushRealtimeBuffer(sourceText, translationText, { force = false } = {}) {
@@ -424,7 +445,12 @@ function shouldFlushRealtimeBuffer(sourceText, translationText, { force = false 
   if (force) return true;
   if (looksLikeSentenceEnd(sourceText)) return true;
   const elapsed = state.realtimeBufferStartedAt ? Date.now() - state.realtimeBufferStartedAt : 0;
-  return elapsed >= MAX_BUFFER_MS && hasLongEnoughRealtimeBuffer(sourceText, translationText);
+  const stats = getSegmentStats(sourceText);
+  if (hasLongEnoughRealtimeBuffer(sourceText, translationText)) return true;
+  if (elapsed >= HISTORY_TIMED_FLUSH_MS && (stats.words >= HISTORY_MIN_TIMED_WORDS || stats.chars >= HISTORY_MIN_TIMED_CHARS)) {
+    return true;
+  }
+  return elapsed >= HISTORY_HARD_FLUSH_MS;
 }
 
 function appendToLastSegment(sourceText) {
@@ -478,7 +504,27 @@ function splitSourceIntoSentences(text) {
   const cleaned = cleanRealtimeSegmentText(text);
   if (!cleaned) return [];
   const pieces = cleaned.match(/[^。．.!?！？]+[。．.!?！？]+|[^。．.!?！？]+$/g) || [cleaned];
-  return pieces.map((piece) => cleanRealtimeSegmentText(piece)).filter(Boolean);
+  return pieces.flatMap(splitLongSegment).filter(Boolean);
+}
+
+function splitLongSegment(text) {
+  const cleaned = cleanRealtimeSegmentText(text);
+  const stats = getSegmentStats(cleaned);
+  if (stats.words <= HISTORY_SOFT_WORD_LIMIT + 8 && stats.chars <= HISTORY_SOFT_CHAR_LIMIT + 40) {
+    return [cleaned];
+  }
+
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length > HISTORY_SOFT_WORD_LIMIT + 8) {
+    const chunks = [];
+    for (let index = 0; index < words.length; index += HISTORY_SOFT_WORD_LIMIT) {
+      chunks.push(words.slice(index, index + HISTORY_SOFT_WORD_LIMIT).join(" "));
+    }
+    return chunks;
+  }
+
+  const chunks = cleaned.match(new RegExp(`.{1,${HISTORY_SOFT_CHAR_LIMIT}}`, "g")) || [cleaned];
+  return chunks.map((chunk) => cleanRealtimeSegmentText(chunk));
 }
 
 function getRealtimeTextDelta(event) {
@@ -752,10 +798,14 @@ async function reviseRecentSegmentsOnce() {
 
     const nextRefined = revised.refined || segment.refined;
     const nextTranslation = revised.translation || segment.translation;
+    const wasPending = segment.pendingTranslation;
     segment.pendingTranslation = false;
     if (nextRefined !== segment.refined || nextTranslation !== segment.translation) {
       segment.refined = nextRefined;
       segment.translation = nextTranslation;
+      changed = true;
+    }
+    if (wasPending) {
       changed = true;
     }
   });
@@ -808,7 +858,12 @@ function scheduleRealtimeHistoryFlush() {
   const sourceCandidate = state.realtimeSourceBuffer.trim();
   const elapsed = Date.now() - state.realtimeBufferStartedAt;
   const remainingMaxDelay = Math.max(SENTENCE_END_DELAY_MS, MAX_BUFFER_MS - elapsed);
-  const delay = looksLikeSentenceEnd(sourceCandidate) ? SENTENCE_END_DELAY_MS : Math.min(REALTIME_FRAGMENT_DELAY_MS, remainingMaxDelay);
+  const remainingHardDelay = Math.max(SENTENCE_END_DELAY_MS, HISTORY_HARD_FLUSH_MS - elapsed);
+  const stats = getSegmentStats(sourceCandidate);
+  const shouldCheckSoon = stats.words >= HISTORY_MIN_TIMED_WORDS || stats.chars >= HISTORY_MIN_TIMED_CHARS;
+  const delay = looksLikeSentenceEnd(sourceCandidate)
+    ? SENTENCE_END_DELAY_MS
+    : Math.min(shouldCheckSoon ? HISTORY_TIMED_FLUSH_MS : REALTIME_FRAGMENT_DELAY_MS, remainingMaxDelay, remainingHardDelay);
   state.realtimeHistoryTimer = window.setTimeout(flushRealtimeHistory, delay);
 }
 
