@@ -181,7 +181,7 @@ h2 {
 }
 
 .device-settings {
-  grid-template-columns: minmax(300px, 1fr) auto minmax(140px, 0.24fr);
+  grid-template-columns: minmax(300px, 1fr) auto minmax(260px, 0.45fr);
 }
 
 .api-note {
@@ -193,11 +193,11 @@ h2 {
 
 .audio-meter {
   position: relative;
-  height: 10px;
-  margin-bottom: 13px;
+  height: 24px;
+  margin-bottom: 9px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 8px;
   background: #eef2f6;
 }
 

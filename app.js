@@ -261,7 +261,7 @@ function startAudioMonitor(stream) {
       sum += centered * centered;
     }
     const rms = Math.sqrt(sum / samples.length);
-    const level = Math.min(100, Math.round((rms / 38) * 100));
+    const level = Math.min(100, Math.round((rms / 24) * 100));
     elements.audioLevelBar.style.width = `${level}%`;
     state.audioMonitor.frameId = requestAnimationFrame(tick);
   };
