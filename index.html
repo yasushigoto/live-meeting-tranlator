@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Live Meeting Translator</title>
-    <link rel="stylesheet" href="./styles.css?v=20260522-8" />
+    <link rel="stylesheet" href="./styles.css?v=20260522-9" />
   </head>
   <body>
     <main class="app-shell">
@@ -148,36 +148,25 @@
           <p class="interim" id="translationHint">Realtime翻訳がここに表示されます。</p>
         </article>
 
-        <article class="panel">
+        <article class="panel wide">
           <div class="panel-head">
-            <h2>文脈補正</h2>
+            <h2>ここまでの要約</h2>
             <div class="panel-actions">
               <button id="copyRefinedBtn" type="button">コピー</button>
-              <span>clean</span>
+              <span>ja</span>
             </div>
           </div>
-          <textarea class="live-text text-area refined" id="refinedText" aria-live="polite" placeholder="文字起こしを文脈に沿って整えた文章がここに入ります。手で直してから翻訳することもできます。"></textarea>
-          <p class="interim" id="refineHint">この文章を翻訳に使います。</p>
+          <textarea class="live-text text-area refined" id="refinedText" aria-live="polite" placeholder="1分くらいの間隔で、ここまでの内容を日本語で要約します。" readonly></textarea>
+          <p class="interim" id="refineHint">ここまでの要約が表示されます。</p>
         </article>
 
-        <article class="panel">
-          <div class="panel-head">
-            <h2>補正後翻訳</h2>
-            <div class="panel-actions">
-              <button id="copyRefinedTranslationBtn" type="button">コピー</button>
-              <span id="refinedTargetBadge">ja</span>
-            </div>
-          </div>
-          <textarea class="live-text text-area translated" id="refinedTranslationText" aria-live="polite" readonly></textarea>
-          <p class="interim">補正後の文章を翻訳します。</p>
-        </article>
       </section>
 
       <section class="history-wrap">
         <div class="history-head">
           <div>
             <h2>文ごとの履歴</h2>
-            <p>文末・語数・時間で区切った補正文と訳文を見比べられます。</p>
+            <p>10 words以上を目安に、文字起こしと訳文を見比べられます。</p>
           </div>
           <div class="button-row compact">
             <button id="copyBtn" type="button" title="Copy">コピー</button>
@@ -201,12 +190,12 @@
           <span class="segment-meta"></span>
         </div>
         <div>
-          <p class="refined"><strong>補正</strong><span></span></p>
+          <p class="refined"><strong>文字起こし</strong><span></span></p>
           <p class="translation"><strong>訳文</strong><span></span></p>
         </div>
       </li>
     </template>
 
-    <script src="./app.js?v=20260522-8" type="module"></script>
+    <script src="./app.js?v=20260522-9" type="module"></script>
   </body>
 </html>

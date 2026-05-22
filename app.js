@@ -3,14 +3,12 @@ const SILENCE_DELAY_MS = 1800;
 const SENTENCE_END_DELAY_MS = 450;
 const REALTIME_FRAGMENT_DELAY_MS = 10000;
 const MAX_BUFFER_MS = 15000;
+const HISTORY_MIN_WORDS = 10;
 const HISTORY_SOFT_WORD_LIMIT = 24;
 const HISTORY_SOFT_CHAR_LIMIT = 120;
-const HISTORY_MIN_TIMED_WORDS = 7;
-const HISTORY_MIN_TIMED_CHARS = 34;
 const HISTORY_TIMED_FLUSH_MS = 6500;
 const HISTORY_HARD_FLUSH_MS = 12000;
-const CONTEXT_REVISE_MS = 10000;
-const CONTEXT_SEGMENT_LIMIT = 6;
+const SUMMARY_INTERVAL_MS = 60000;
 const OPENAI_AUDIO_CHUNK_MS = 2200;
 
 const elements = {
@@ -72,7 +70,7 @@ const state = {
   pendingTranscript: [],
   pendingStartedAt: 0,
   flushTimer: null,
-  contextTimer: null,
+  summaryTimer: null,
   realtime: null,
   realtimeSourceBuffer: "",
   realtimeTranslationBuffer: "",
@@ -85,6 +83,8 @@ const state = {
   activeCaptureMode: "",
   openaiAudio: null,
   apiKeyEditorOpen: false,
+  summaryText: "",
+  lastSummarySegmentCount: 0,
 };
 
 const storageKey = "live-meeting-translator-settings";
@@ -142,7 +142,9 @@ function updateStatus(label, active = false) {
 function updateBadges() {
   elements.sourceBadge.textContent = elements.sourceLang.value;
   elements.targetBadge.textContent = elements.targetLang.value;
-  elements.refinedTargetBadge.textContent = elements.targetLang.value;
+  if (elements.refinedTargetBadge) {
+    elements.refinedTargetBadge.textContent = elements.targetLang.value;
+  }
 }
 
 function updateDeviceModeNote() {
@@ -365,18 +367,18 @@ function enqueueProcessing(task) {
     .catch(() => undefined)
     .then(task)
     .catch((error) => {
-      elements.refineHint.textContent = error.message || "処理を続行できませんでした。";
+      elements.translationHint.textContent = error.message || "処理を続行できませんでした。";
     });
   return state.processingQueue;
 }
 
 function showPendingProcessingAfterStop() {
-  elements.refineHint.textContent = "残りの文脈補正を続けています...";
+  elements.refineHint.textContent = "最後の要約を準備しています...";
   elements.translationHint.textContent = "残りの翻訳を続けています...";
   window.setTimeout(() => {
     state.processingQueue.finally(() => {
       if (!state.listening) {
-        elements.refineHint.textContent = "停止後の補正まで完了しました。";
+        elements.refineHint.textContent = "停止後の要約まで完了しました。";
         elements.translationHint.textContent = "停止後の翻訳まで完了しました。";
       }
     });
@@ -385,17 +387,17 @@ function showPendingProcessingAfterStop() {
 
 function renderHistoryItem(segment) {
   const fragment = elements.itemTemplate.content.cloneNode(true);
-  const stats = getSegmentStats(segment.refined || segment.original || "");
+  const stats = getSegmentStats(segment.original || "");
   const item = fragment.querySelector("li");
   item.classList.toggle("short", stats.words <= 8 && stats.chars <= 48);
   fragment.querySelector("time").textContent = segment.time;
   fragment.querySelector(".segment-meta").textContent =
     stats.words > 1 ? `${stats.words} words` : `${stats.chars} chars`;
-  fragment.querySelector(".refined span").textContent = segment.refined || "";
+  fragment.querySelector(".refined span").textContent = segment.original || "";
   const translationLabel = segment.pendingTranslation && segment.translation
-    ? `${segment.translation}（補正後翻訳中...）`
+    ? `${segment.translation}（翻訳中...）`
     : segment.pendingTranslation
-      ? "補正後翻訳中..."
+      ? "翻訳中..."
       : segment.translation || "翻訳なし";
   fragment.querySelector(".translation span").textContent = translationLabel;
   elements.historyList.prepend(fragment);
@@ -442,14 +444,13 @@ function hasLongEnoughRealtimeBuffer(sourceText, translationText) {
 
 function shouldFlushRealtimeBuffer(sourceText, translationText, { force = false } = {}) {
   if (!sourceText) return false;
+  const stats = getSegmentStats(sourceText);
   if (force) return true;
+  if (stats.words < HISTORY_MIN_WORDS) return false;
   if (looksLikeSentenceEnd(sourceText)) return true;
   const elapsed = state.realtimeBufferStartedAt ? Date.now() - state.realtimeBufferStartedAt : 0;
-  const stats = getSegmentStats(sourceText);
   if (hasLongEnoughRealtimeBuffer(sourceText, translationText)) return true;
-  if (elapsed >= HISTORY_TIMED_FLUSH_MS && (stats.words >= HISTORY_MIN_TIMED_WORDS || stats.chars >= HISTORY_MIN_TIMED_CHARS)) {
-    return true;
-  }
+  if (elapsed >= HISTORY_TIMED_FLUSH_MS) return true;
   return elapsed >= HISTORY_HARD_FLUSH_MS;
 }
 
@@ -459,7 +460,6 @@ function appendToLastSegment(sourceText) {
 
   if (sourceText) {
     last.original = [last.original, sourceText].filter(Boolean).join(" ");
-    last.refined = [last.refined, sourceText].filter(Boolean).join(" ");
   }
 
   state.transcript = state.segments.map((segment) => segment.original);
@@ -491,10 +491,11 @@ function shouldPreserveRealtimeTranslation() {
 }
 
 function refreshStructuredPanels() {
-  state.refined = state.segments.map((segment) => segment.refined);
   state.translations = getDisplayTranslations();
-  replaceLiveText(elements.refinedText, state.refined, { separator: " " });
-  replaceLiveText(elements.refinedTranslationText, state.translations, { separator: " " });
+  elements.refinedText.value = state.summaryText;
+  if (elements.refinedTranslationText) {
+    elements.refinedTranslationText.value = "";
+  }
   if (!shouldPreserveRealtimeTranslation()) {
     replaceLiveText(elements.translationText, state.translations);
   }
@@ -504,7 +505,7 @@ function splitSourceIntoSentences(text) {
   const cleaned = cleanRealtimeSegmentText(text);
   if (!cleaned) return [];
   const pieces = cleaned.match(/[^。．.!?！？]+[。．.!?！？]+|[^。．.!?！？]+$/g) || [cleaned];
-  return pieces.flatMap(splitLongSegment).filter(Boolean);
+  return groupShortSegments(pieces.flatMap(splitLongSegment).filter(Boolean));
 }
 
 function splitLongSegment(text) {
@@ -525,6 +526,31 @@ function splitLongSegment(text) {
 
   const chunks = cleaned.match(new RegExp(`.{1,${HISTORY_SOFT_CHAR_LIMIT}}`, "g")) || [cleaned];
   return chunks.map((chunk) => cleanRealtimeSegmentText(chunk));
+}
+
+function groupShortSegments(pieces) {
+  const grouped = [];
+  let buffer = "";
+
+  for (const piece of pieces) {
+    const next = [buffer, piece].filter(Boolean).join(" ");
+    if (getSegmentStats(next).words >= HISTORY_MIN_WORDS) {
+      grouped.push(next);
+      buffer = "";
+    } else {
+      buffer = next;
+    }
+  }
+
+  if (buffer) {
+    if (grouped.length) {
+      grouped[grouped.length - 1] = `${grouped[grouped.length - 1]} ${buffer}`.trim();
+    } else {
+      grouped.push(buffer);
+    }
+  }
+
+  return grouped;
 }
 
 function getRealtimeTextDelta(event) {
@@ -658,196 +684,93 @@ async function transcribeAudioWithOpenAI(audioBlob) {
   return data.transcriptText || "";
 }
 
-async function refineText(text) {
-  const source = getLangRoot(elements.sourceLang.value);
-  if (useBrowserApiKey()) {
-    return fetchOpenAITextTask(
-      [
-        `You clean up live meeting transcripts in ${source}.`,
-        "Fix obvious speech recognition errors, punctuation, casing, spacing, and duplicated filler.",
-        "Preserve meaning, speaker intent, names, numbers, and technical terms.",
-        "Do not summarize. Return only the corrected text.",
-      ].join(" "),
-      text,
-    );
-  }
-
-  const response = await fetch("/refine", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, source }),
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `文脈補正エラー: ${response.status}`);
-  }
-
-  const data = await response.json();
-  return data.refinedText || basicRefineText(text);
-}
-
-async function reviseContextSegments(segments) {
-  const source = getLangRoot(elements.sourceLang.value);
-  const target = elements.targetLang.value;
-  if (useBrowserApiKey()) {
-    return reviseContextSegmentsInBrowser(segments, source, target);
-  }
-
-  const response = await fetch("/revise-context", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      source,
-      target,
-      segments: segments.map((segment) => ({
-        original: segment.original,
-        refined: segment.refined,
-        translation: segment.translation,
-      })),
-    }),
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `文脈再補正エラー: ${response.status}`);
-  }
-
-  const data = await response.json();
-  return Array.isArray(data.segments) ? data.segments : [];
-}
-
-async function reviseContextSegmentsInBrowser(segments, source, target) {
-  const context = segments
-    .map((segment, index) =>
-      `${index + 1}. source: ${segment.original || segment.refined || ""}`,
-    )
-    .join("\n");
-  const output = await fetchOpenAITextTask(
-    [
-      "Revise live meeting transcript segments using nearby context.",
-      `Source language: ${source}. Target language: ${target}.`,
-      "For each segment, clean up recognition errors, then translate that corrected source text.",
-      "Use the source text as the authority. Do not invent missing sentences.",
-      "Keep the same number and order of segments. Do not merge or summarize.",
-      "Return JSON only: {\"segments\":[{\"refined\":\"...\",\"translation\":\"...\"}]}",
-    ].join(" "),
-    context,
-  );
-
-  try {
-    const parsed = parseJsonObject(output);
-    if (Array.isArray(parsed?.segments)) {
-      return segments.map((segment, index) => ({
-        refined: parsed.segments[index]?.refined || segment.refined,
-        translation: parsed.segments[index]?.translation || segment.translation,
-      }));
-    }
-  } catch {
-    // Fall through to the conservative parser below.
-  }
-
-  const lines = parseNumberedLines(output, segments.length);
-  return segments.map((segment, index) => ({
-    refined: lines[index] || segment.refined,
-    translation: segment.translation,
-  }));
-}
-
-async function refineAndTranslateSegments(segments) {
+async function translateSegments(segments) {
   if (!segments.length) return;
-  elements.refineHint.textContent = "確定した文を補正中...";
+  elements.translationHint.textContent = "履歴用の訳文を作成中...";
 
   try {
-    const revisedSegments = await reviseContextSegments(segments);
-    revisedSegments.forEach((revised, index) => {
-      const segment = segments[index];
-      if (!segment) return;
-      segment.refined = revised.refined || basicRefineText(segment.original);
-      segment.translation = revised.translation || segment.translation || "";
+    await Promise.all(segments.map(async (segment) => {
+      segment.translation = await translateText(segment.original);
       segment.pendingTranslation = false;
-    });
+    }));
   } catch (error) {
     elements.translationHint.textContent = error.message;
     segments.forEach((segment) => {
-      segment.refined = basicRefineText(segment.original);
       segment.pendingTranslation = false;
     });
   }
 
   refreshStructuredPanels();
   renderHistory();
-  elements.refineHint.textContent = "文脈で再補正しました。";
+  elements.translationHint.textContent = state.listening ? "Realtime翻訳を受信中..." : "";
 }
 
-async function refineAndTranslateSegment(segment) {
-  return refineAndTranslateSegments([segment]);
-}
+async function summarizeInJapanese() {
+  const transcript = state.segments.map((segment) => segment.original).join("\n");
+  if (!transcript.trim()) return "";
 
-async function reviseRecentSegmentsOnce() {
-  const start = Math.max(0, state.segments.length - CONTEXT_SEGMENT_LIMIT);
-  const targetSegments = state.segments.slice(start);
-  if (targetSegments.length < 1) return false;
+  if (useBrowserApiKey()) {
+    return fetchOpenAITextTask(
+      [
+        "Summarize the meeting transcript so far in Japanese.",
+        "Focus on decisions, important facts, questions, and action items.",
+        "Do not translate line by line. Use concise bullet points.",
+      ].join(" "),
+      transcript,
+    );
+  }
 
-  const revisedSegments = await reviseContextSegments(targetSegments);
-  let changed = false;
-
-  revisedSegments.forEach((revised, index) => {
-    const segment = targetSegments[index];
-    if (!segment) return;
-
-    const nextRefined = revised.refined || segment.refined;
-    const nextTranslation = revised.translation || segment.translation;
-    const wasPending = segment.pendingTranslation;
-    segment.pendingTranslation = false;
-    if (nextRefined !== segment.refined || nextTranslation !== segment.translation) {
-      segment.refined = nextRefined;
-      segment.translation = nextTranslation;
-      changed = true;
-    }
-    if (wasPending) {
-      changed = true;
-    }
+  const response = await fetch("/summarize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: transcript }),
   });
 
-  if (changed) {
-    refreshStructuredPanels();
-    renderHistory();
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `要約エラー: ${response.status}`);
   }
-  return changed;
+
+  const data = await response.json();
+  return data.summaryText || "";
 }
 
-function enqueueFinalContextRevisionAfterStop() {
-  clearTimeout(state.contextTimer);
-  state.contextTimer = null;
-  window.setTimeout(() => {
-    enqueueProcessing(async () => {
-      elements.refineHint.textContent = "停止後の文脈補正を仕上げています...";
-      try {
-        await reviseRecentSegmentsOnce();
-      } catch (error) {
-        elements.refineHint.textContent = error.message;
-      }
-    });
-  }, 0);
+function scheduleSummaryUpdate(delay = SUMMARY_INTERVAL_MS) {
+  clearTimeout(state.summaryTimer);
+  state.summaryTimer = window.setTimeout(runSummaryUpdate, delay);
 }
 
-function parseNumberedLines(text, expectedCount) {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^\s*\d+[\).:-]?\s*/, "").trim())
-    .filter(Boolean);
-
-  if (lines.length >= expectedCount) return lines.slice(0, expectedCount);
-  if (expectedCount === 1 && text.trim()) return [text.trim().replace(/^\s*\d+[\).:-]?\s*/, "")];
-  return lines;
+function enqueueFinalSummaryAfterStop() {
+  clearTimeout(state.summaryTimer);
+  state.summaryTimer = null;
+  enqueueProcessing(() => runSummaryUpdate({ final: true }));
 }
 
-function scheduleContextRevision() {
-  if (state.contextTimer) return;
-  if (state.segments.length < 1) return;
-  elements.refineHint.textContent = `${CONTEXT_REVISE_MS / 1000}秒後に文脈補正します...`;
-  state.contextTimer = window.setTimeout(runContextRevision, CONTEXT_REVISE_MS);
+async function runSummaryUpdate({ final = false } = {}) {
+  if (!state.segments.length) {
+    if (state.listening) scheduleSummaryUpdate();
+    return;
+  }
+  if (!final && state.lastSummarySegmentCount === state.segments.length) {
+    if (state.listening) scheduleSummaryUpdate();
+    return;
+  }
+
+  elements.refineHint.textContent = final ? "最後の要約を作成中..." : "ここまでの要約を作成中...";
+  try {
+    const summary = await summarizeInJapanese();
+    if (summary) {
+      const stamp = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
+      state.summaryText = `[${stamp}]\n${summary}`;
+      state.lastSummarySegmentCount = state.segments.length;
+      elements.refinedText.value = state.summaryText;
+      elements.refineHint.textContent = final ? "最後の要約を表示しました。" : "ここまでの要約を更新しました。";
+    }
+  } catch (error) {
+    elements.refineHint.textContent = error.message;
+  } finally {
+    if (state.listening) scheduleSummaryUpdate();
+  }
 }
 
 function scheduleRealtimeHistoryFlush() {
@@ -860,7 +783,7 @@ function scheduleRealtimeHistoryFlush() {
   const remainingMaxDelay = Math.max(SENTENCE_END_DELAY_MS, MAX_BUFFER_MS - elapsed);
   const remainingHardDelay = Math.max(SENTENCE_END_DELAY_MS, HISTORY_HARD_FLUSH_MS - elapsed);
   const stats = getSegmentStats(sourceCandidate);
-  const shouldCheckSoon = stats.words >= HISTORY_MIN_TIMED_WORDS || stats.chars >= HISTORY_MIN_TIMED_CHARS;
+  const shouldCheckSoon = stats.words >= HISTORY_MIN_WORDS;
   const delay = looksLikeSentenceEnd(sourceCandidate)
     ? SENTENCE_END_DELAY_MS
     : Math.min(shouldCheckSoon ? HISTORY_TIMED_FLUSH_MS : REALTIME_FRAGMENT_DELAY_MS, remainingMaxDelay, remainingHardDelay);
@@ -890,7 +813,6 @@ function flushRealtimeHistory(options = {}) {
     if (!appendToLastSegment(sourceText)) {
       return;
     }
-    scheduleContextRevision();
     return;
   }
 
@@ -898,7 +820,6 @@ function flushRealtimeHistory(options = {}) {
   const createdSegments = sourceSentences.map((sentence) => ({
     time: new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date()),
     original: sentence,
-    refined: sentence,
     translation: "",
     pendingTranslation: true,
   }));
@@ -910,8 +831,7 @@ function flushRealtimeHistory(options = {}) {
   refreshStructuredPanels();
   elements.translationText.dataset.realtimePrefixNeeded = "true";
   renderHistory();
-  enqueueProcessing(() => refineAndTranslateSegments(createdSegments));
-  scheduleContextRevision();
+  enqueueProcessing(() => translateSegments(createdSegments));
 }
 
 function getRealtimeTargetLanguage() {
@@ -1036,7 +956,7 @@ async function startOpenAIAudioTranscription() {
   updateStatus("録音中", true);
   elements.startBtn.disabled = true;
   elements.stopBtn.disabled = false;
-  elements.refineHint.textContent = "この文章を翻訳に使います。";
+  elements.refineHint.textContent = "1分くらいの間隔で要約します。";
   elements.translationHint.textContent = "";
   elements.interimText.textContent = "OpenAI APIで音声入力中...";
 
@@ -1056,6 +976,7 @@ async function startOpenAIAudioTranscription() {
   state.listening = true;
   state.manualStop = false;
   state.activeCaptureMode = "openai-audio";
+  scheduleSummaryUpdate();
   recordNextOpenAIAudioSegment();
 }
 
@@ -1066,7 +987,7 @@ function handleRealtimeEvent(event) {
   if ((lowerType.includes("input") || lowerType.includes("conversation.item.input")) && lowerType.includes("transcript") && delta) {
     state.realtimeSourceBuffer += delta;
     appendRealtimeDelta(elements.transcriptText, delta);
-    elements.refineHint.textContent = "Realtime入力を受信中...";
+    elements.refineHint.textContent = "ここまでの要約を準備中...";
     scheduleRealtimeHistoryFlush();
     return;
   }
@@ -1153,7 +1074,7 @@ async function startRealtimeTranslation() {
 
   events.addEventListener("open", () => {
     updateStatus("Realtime中", true);
-    elements.refineHint.textContent = "Realtime翻訳中";
+    elements.refineHint.textContent = "1分くらいの間隔で要約します。";
     elements.translationHint.textContent = "";
   });
 
@@ -1195,6 +1116,7 @@ async function startRealtimeTranslation() {
   state.listening = true;
   state.manualStop = false;
   state.activeCaptureMode = "realtime";
+  scheduleSummaryUpdate();
 }
 
 async function createRealtimeSession(targetLanguage, stream) {
@@ -1250,29 +1172,6 @@ async function createRealtimeSession(targetLanguage, stream) {
   return sessionResponse.json();
 }
 
-function runContextRevision() {
-  state.contextTimer = null;
-  if (state.segments.length < 1) return;
-
-  elements.refineHint.textContent = "前後の文脈で再補正中...";
-  enqueueProcessing(async () => {
-    try {
-      const changed = await reviseRecentSegmentsOnce();
-      if (changed) {
-        elements.refineHint.textContent = "文脈で再補正しました。";
-      } else {
-        elements.refineHint.textContent = "";
-      }
-    } catch (error) {
-      elements.refineHint.textContent = error.message;
-    } finally {
-      if (state.listening && state.segments.length > 0) {
-        scheduleContextRevision();
-      }
-    }
-  });
-}
-
 async function getBrowserTranslator(source, target) {
   const key = `${source}:${target}`;
   if (state.translator && state.translatorKey === key) return state.translator;
@@ -1324,7 +1223,7 @@ async function translateText(text) {
     return data.translatedText || "";
   }
 
-  if (mode === "openai") {
+  if (mode === "openai" || mode === "realtime") {
     if (useBrowserApiKey()) {
       return fetchOpenAITextTask(`Translate from ${source} to ${target}. Return only the translated text.`, text);
     }
@@ -1374,25 +1273,11 @@ async function handleFinalTranscript(text, options = {}) {
     appendLiveText(elements.transcriptText, cleanText);
   }
   elements.interimText.textContent = "";
-  elements.refineHint.textContent = "文脈補正中...";
   elements.translationHint.textContent = "翻訳中...";
 
-  let refinedText = basicRefineText(cleanText);
   let translated = "";
   try {
-    try {
-      refinedText = await refineText(cleanText);
-    } catch (error) {
-      elements.refineHint.textContent = `${error.message} 基本整形で続行します。`;
-    }
-
-    state.refined.push(refinedText);
-    appendLiveText(elements.refinedText, refinedText);
-    if (elements.refineHint.textContent === "文脈補正中...") {
-      elements.refineHint.textContent = "";
-    }
-
-    translated = await translateText(refinedText);
+    translated = await translateText(cleanText);
     if (translated) {
       state.translations.push(translated);
       appendLiveText(elements.translationText, translated);
@@ -1407,12 +1292,10 @@ async function handleFinalTranscript(text, options = {}) {
   const segment = {
     time: new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date()),
     original: cleanText,
-    refined: refinedText,
     translation: translated,
   };
   state.segments.push(segment);
   renderHistoryItem(segment);
-  scheduleContextRevision();
 }
 
 function scheduleBufferedTranscript(text) {
@@ -1425,21 +1308,22 @@ function scheduleBufferedTranscript(text) {
 
   state.pendingTranscript.push(cleanText);
   clearTimeout(state.flushTimer);
-  clearTimeout(state.contextTimer);
 
-  if (Date.now() - state.pendingStartedAt >= MAX_BUFFER_MS) {
+  const bufferedText = state.pendingTranscript.join(" ");
+  const bufferedStats = getSegmentStats(bufferedText);
+
+  if (Date.now() - state.pendingStartedAt >= MAX_BUFFER_MS && bufferedStats.words >= HISTORY_MIN_WORDS) {
     flushBufferedTranscript();
     return;
   }
 
-  const bufferedText = state.pendingTranscript.join(" ");
-  if (looksLikeSentenceEnd(bufferedText)) {
-    elements.refineHint.textContent = "文末を検出しました...";
+  if (looksLikeSentenceEnd(bufferedText) && bufferedStats.words >= HISTORY_MIN_WORDS) {
+    elements.refineHint.textContent = "要約用の文字起こしを蓄積中...";
     state.flushTimer = window.setTimeout(flushBufferedTranscript, SENTENCE_END_DELAY_MS);
     return;
   }
 
-  elements.refineHint.textContent = "発話の区切りを待っています...";
+  elements.refineHint.textContent = "要約用の文字起こしを蓄積中...";
   state.flushTimer = window.setTimeout(flushBufferedTranscript, SILENCE_DELAY_MS);
 }
 
@@ -1472,6 +1356,8 @@ function setupRecognition() {
     elements.startBtn.disabled = true;
     elements.stopBtn.disabled = false;
     updateStatus("録音中", true);
+    elements.refineHint.textContent = "1分くらいの間隔で要約します。";
+    scheduleSummaryUpdate();
   };
 
   recognition.onresult = (event) => {
@@ -1551,7 +1437,7 @@ function stopListening() {
     elements.startBtn.disabled = false;
     elements.stopBtn.disabled = true;
     updateStatus("待機中");
-    enqueueFinalContextRevisionAfterStop();
+    enqueueFinalSummaryAfterStop();
     showPendingProcessingAfterStop();
     return;
   }
@@ -1562,13 +1448,13 @@ function stopListening() {
     elements.stopBtn.disabled = true;
     updateStatus("待機中");
     elements.interimText.textContent = "";
-    enqueueFinalContextRevisionAfterStop();
+    enqueueFinalSummaryAfterStop();
     showPendingProcessingAfterStop();
     return;
   }
   flushBufferedTranscript();
   state.recognition?.stop();
-  enqueueFinalContextRevisionAfterStop();
+  enqueueFinalSummaryAfterStop();
   showPendingProcessingAfterStop();
 }
 
@@ -1604,7 +1490,7 @@ async function copyHistory() {
 
 function buildExportText() {
   return state.segments
-    .map((segment) => `[${segment.time}]\n補正: ${segment.refined || ""}\n訳文: ${segment.translation || ""}`)
+    .map((segment) => `[${segment.time}]\n文字起こし: ${segment.original || ""}\n訳文: ${segment.translation || ""}`)
     .join("\n\n");
 }
 
@@ -1621,7 +1507,6 @@ function downloadHistory() {
 
 function clearHistory() {
   state.transcript = [];
-  state.refined = [];
   state.translations = [];
   state.segments = [];
   state.pendingTranscript = [];
@@ -1629,17 +1514,22 @@ function clearHistory() {
   state.realtimeSourceBuffer = "";
   state.realtimeTranslationBuffer = "";
   state.realtimeBufferStartedAt = 0;
+  state.summaryText = "";
+  state.lastSummarySegmentCount = 0;
   clearTimeout(state.flushTimer);
   clearTimeout(state.realtimeHistoryTimer);
+  clearTimeout(state.summaryTimer);
   cleanupRealtime();
   cleanupOpenAIAudio();
   elements.transcriptText.value = "";
   elements.refinedText.value = "";
   elements.translationText.value = "";
-  elements.refinedTranslationText.value = "";
+  if (elements.refinedTranslationText) {
+    elements.refinedTranslationText.value = "";
+  }
   elements.historyList.replaceChildren();
   elements.interimText.textContent = "";
-  elements.refineHint.textContent = "この文章を翻訳に使います。";
+  elements.refineHint.textContent = "ここまでの要約が表示されます。";
   elements.translationHint.textContent = "翻訳結果がここに表示されます。";
 }
 
@@ -1649,7 +1539,7 @@ elements.translateInputBtn.addEventListener("click", translateTypedInput);
 elements.copyTranscriptBtn.addEventListener("click", () => copyText(elements.transcriptText.value));
 elements.copyRefinedBtn.addEventListener("click", () => copyText(elements.refinedText.value));
 elements.copyTranslationBtn.addEventListener("click", () => copyText(elements.translationText.value));
-elements.copyRefinedTranslationBtn.addEventListener("click", () => copyText(elements.refinedTranslationText.value));
+elements.copyRefinedTranslationBtn?.addEventListener("click", () => copyText(elements.refinedTranslationText.value));
 elements.copyBtn.addEventListener("click", copyHistory);
 elements.downloadBtn.addEventListener("click", downloadHistory);
 elements.clearBtn.addEventListener("click", clearHistory);

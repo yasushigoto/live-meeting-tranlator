@@ -125,6 +125,55 @@ async function translateWithOpenAI({ text, source, target }) {
   );
 }
 
+async function summarizeWithOpenAI({ text }) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY が設定されていません。");
+  }
+  if (!text) {
+    throw new Error("要約するテキストを指定してください。");
+  }
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: process.env.OPENAI_SUMMARY_MODEL || process.env.OPENAI_TRANSLATION_MODEL || "gpt-5-mini",
+      input: [
+        {
+          role: "system",
+          content: [
+            "Summarize the meeting transcript so far in Japanese.",
+            "Focus on decisions, important facts, questions, and action items.",
+            "Do not translate line by line. Use concise bullet points.",
+          ].join(" "),
+        },
+        {
+          role: "user",
+          content: text,
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error?.message || `OpenAI API error (${response.status})`);
+  }
+
+  if (typeof data.output_text === "string") return data.output_text.trim();
+
+  return (
+    data.output
+      ?.flatMap((item) => item.content || [])
+      .map((content) => content.text || "")
+      .join("")
+      .trim() || ""
+  );
+}
+
 async function transcribeWithOpenAI({ audioBuffer, mimeType, source }) {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY が設定されていません。");
@@ -375,6 +424,13 @@ const server = http.createServer(async (request, response) => {
       const body = await readJson(request);
       const translatedText = await translateWithOpenAI(body);
       sendJson(response, 200, { translatedText });
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/summarize") {
+      const body = await readJson(request);
+      const summaryText = await summarizeWithOpenAI(body);
+      sendJson(response, 200, { summaryText });
       return;
     }
 
