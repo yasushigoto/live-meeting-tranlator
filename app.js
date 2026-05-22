@@ -19,6 +19,8 @@ const elements = {
   apiSettings: document.querySelector("#apiSettings"),
   browserKeyField: document.querySelector("#browserKeyField"),
   browserApiKey: document.querySelector("#browserApiKey"),
+  showBrowserKeyActions: document.querySelector("#showBrowserKeyActions"),
+  showBrowserKeyBtn: document.querySelector("#showBrowserKeyBtn"),
   browserKeyActions: document.querySelector("#browserKeyActions"),
   saveBrowserKeyBtn: document.querySelector("#saveBrowserKeyBtn"),
   clearBrowserKeyBtn: document.querySelector("#clearBrowserKeyBtn"),
@@ -287,6 +289,7 @@ function toggleApiSettings() {
   const showBrowserKey = useBrowserApiKey();
   elements.settingsRow.classList.toggle("key-visible", showBrowserKey);
   elements.apiSettings.classList.toggle("key-visible", showBrowserKey);
+  elements.showBrowserKeyActions.hidden = showBrowserKey || !usesOpenAI();
   elements.browserKeyField.hidden = !showBrowserKey;
   elements.browserKeyActions.hidden = !showBrowserKey;
   elements.apiNote.textContent =
@@ -1549,6 +1552,12 @@ elements.translatorMode.addEventListener("change", () => {
 elements.apiMode.addEventListener("change", () => {
   toggleApiSettings();
   saveSettings();
+});
+elements.showBrowserKeyBtn.addEventListener("click", () => {
+  elements.apiMode.value = "browser";
+  toggleApiSettings();
+  saveSettings();
+  elements.browserApiKey.focus();
 });
 elements.saveBrowserKeyBtn.addEventListener("click", saveBrowserApiKey);
 elements.clearBrowserKeyBtn.addEventListener("click", clearBrowserApiKey);

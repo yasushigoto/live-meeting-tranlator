@@ -89,9 +89,12 @@
             <span>API接続方式</span>
             <select id="apiMode">
               <option value="server">サーバー経由</option>
-              <option value="browser">ブラウザにAPIキーを保存</option>
+              <option value="browser">ブラウザ保存</option>
             </select>
           </label>
+          <div class="button-row compact" id="showBrowserKeyActions">
+            <button id="showBrowserKeyBtn" type="button">APIキー入力</button>
+          </div>
           <label id="browserKeyField" hidden>
             <span>OpenAI API Key</span>
             <input id="browserApiKey" type="password" autocomplete="off" placeholder="sk-..." />
