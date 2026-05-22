@@ -620,6 +620,21 @@ function parseJsonObject(text) {
   }
 }
 
+function cleanSummaryText(text) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^(議事|会議|要約|要点|概要|発言|話題|論点|決定事項|重要事実|質問|アクション|次の対応|まとめ|ポイント)[^。！？]*[:：]?\s*$/i.test(line))
+    .map((line) =>
+      line
+        .replace(/^[-*・]\s*(議事|会議|要約|要点|概要|発言の傾向|発言|話題|論点|決定事項|重要事実|質問|アクション|次の対応|まとめ|ポイント)\s*[:：]\s*/i, "- ")
+        .replace(/^(議事|会議|要約|要点|概要|発言の傾向|発言|話題|論点|決定事項|重要事実|質問|アクション|次の対応|まとめ|ポイント)\s*[:：]\s*/i, ""),
+    )
+    .filter((line) => line && line !== "-" && line !== "・")
+    .join("\n");
+}
+
 async function fetchOpenAITextTask(systemPrompt, userText) {
   const key = getBrowserApiKey();
   if (!key) throw new Error("OpenAI API Keyを入力してください。");
@@ -710,8 +725,9 @@ async function summarizeInJapanese() {
     return fetchOpenAITextTask(
       [
         "Summarize the meeting transcript so far in Japanese.",
-        "Write naturally without fixed category labels such as decisions, important facts, questions, or action items.",
-        "Use 2 to 5 short Japanese sentences or bullets. Omit empty/none sections.",
+        "Use only plain bullet points. Each line must start with '- '.",
+        "Do not use headings or labels. Never write category names such as 議事の要点, 発言の傾向, 決定事項, 重要事実, 質問, アクション, まとめ, or ポイント.",
+        "Use 2 to 5 short bullets. Omit empty/none sections.",
         "Capture the gist and flow of the discussion. Do not translate line by line.",
       ].join(" "),
       transcript,
@@ -756,7 +772,7 @@ async function runSummaryUpdate({ final = false } = {}) {
 
   elements.refineHint.textContent = final ? "最後の要約を作成中..." : "ここまでの要約を作成中...";
   try {
-    const summary = await summarizeInJapanese();
+    const summary = cleanSummaryText(await summarizeInJapanese());
     if (summary) {
       const stamp = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
       state.summaryText = `[${stamp}]\n${summary}`;

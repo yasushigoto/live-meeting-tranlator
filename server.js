@@ -146,8 +146,9 @@ async function summarizeWithOpenAI({ text }) {
           role: "system",
           content: [
             "Summarize the meeting transcript so far in Japanese.",
-            "Write naturally without fixed category labels such as decisions, important facts, questions, or action items.",
-            "Use 2 to 5 short Japanese sentences or bullets. Omit empty/none sections.",
+            "Use only plain bullet points. Each line must start with '- '.",
+            "Do not use headings or labels. Never write category names such as 議事の要点, 発言の傾向, 決定事項, 重要事実, 質問, アクション, まとめ, or ポイント.",
+            "Use 2 to 5 short bullets. Omit empty/none sections.",
             "Capture the gist and flow of the discussion. Do not translate line by line.",
           ].join(" "),
         },
