@@ -364,11 +364,29 @@ function enqueueProcessing(task) {
   return state.processingQueue;
 }
 
+function showPendingProcessingAfterStop() {
+  elements.refineHint.textContent = "残りの文脈補正を続けています...";
+  elements.translationHint.textContent = "残りの翻訳を続けています...";
+  window.setTimeout(() => {
+    state.processingQueue.finally(() => {
+      if (!state.listening) {
+        elements.refineHint.textContent = "停止後の補正まで完了しました。";
+        elements.translationHint.textContent = "停止後の翻訳まで完了しました。";
+      }
+    });
+  }, 0);
+}
+
 function renderHistoryItem(segment) {
   const fragment = elements.itemTemplate.content.cloneNode(true);
   fragment.querySelector("time").textContent = segment.time;
   fragment.querySelector(".refined span").textContent = segment.refined || "";
-  fragment.querySelector(".translation span").textContent = segment.pendingTranslation ? "翻訳中..." : segment.translation || "翻訳なし";
+  const translationLabel = segment.pendingTranslation && segment.translation
+    ? `${segment.translation}（補正後翻訳中...）`
+    : segment.pendingTranslation
+      ? "補正後翻訳中..."
+      : segment.translation || "翻訳なし";
+  fragment.querySelector(".translation span").textContent = translationLabel;
   elements.historyList.prepend(fragment);
 }
 
@@ -463,6 +481,13 @@ function splitSourceIntoSentences(text) {
   return pieces.map((piece) => cleanRealtimeSegmentText(piece)).filter(Boolean);
 }
 
+function splitTargetIntoSentences(text) {
+  const cleaned = cleanRealtimeSegmentText(text);
+  if (!cleaned) return [];
+  const pieces = cleaned.match(/[^。．.!?！？]+[。．.!?！？]+|[^。．.!?！？]+$/g) || [cleaned];
+  return pieces.map((piece) => cleanRealtimeSegmentText(piece)).filter(Boolean);
+}
+
 function getRealtimeTextDelta(event) {
   return (
     event.delta ||
@@ -522,6 +547,15 @@ function parseOpenAIOutputText(data) {
       .join("")
       .trim() || ""
   );
+}
+
+function parseJsonObject(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    return match ? JSON.parse(match[0]) : null;
+  }
 }
 
 async function fetchOpenAITextTask(systemPrompt, userText) {
@@ -646,33 +680,37 @@ async function reviseContextSegments(segments) {
 
 async function reviseContextSegmentsInBrowser(segments, source, target) {
   const context = segments
-    .map((segment, index) => `${index + 1}. ${segment.original || segment.refined || ""}`)
+    .map((segment, index) =>
+      `${index + 1}. source: ${segment.original || segment.refined || ""}\n   current translation: ${segment.translation || ""}`,
+    )
     .join("\n");
-  const refinedBlock = await fetchOpenAITextTask(
+  const output = await fetchOpenAITextTask(
     [
-      `Clean up these live meeting transcript segments in ${source}.`,
-      "Remove filler words, repeated fragments, and obvious recognition errors.",
-      "Preserve meaning, numbers, names, technical and medical terms.",
-      "Return the same number of lines. Format each line as: 1. corrected text",
-      "Do not translate.",
+      "Revise live meeting transcript segments using nearby context.",
+      `Source language: ${source}. Target language: ${target}.`,
+      "For each segment, clean up recognition errors and translate the corrected text.",
+      "Keep the same number and order of segments. Do not merge or summarize.",
+      "Return JSON only: {\"segments\":[{\"refined\":\"...\",\"translation\":\"...\"}]}",
     ].join(" "),
     context,
   );
 
-  const refinedLines = parseNumberedLines(refinedBlock, segments.length);
-  const translatedBlock = await fetchOpenAITextTask(
-    [
-      `Translate these ${source} meeting transcript segments to ${target}.`,
-      "Use the corrected source text. Return the same number of lines.",
-      "Format each line as: 1. translated text",
-    ].join(" "),
-    refinedLines.map((line, index) => `${index + 1}. ${line}`).join("\n"),
-  );
-  const translationLines = parseNumberedLines(translatedBlock, segments.length);
+  try {
+    const parsed = parseJsonObject(output);
+    if (Array.isArray(parsed?.segments)) {
+      return segments.map((segment, index) => ({
+        refined: parsed.segments[index]?.refined || segment.refined,
+        translation: parsed.segments[index]?.translation || segment.translation,
+      }));
+    }
+  } catch {
+    // Fall through to the conservative parser below.
+  }
 
+  const lines = parseNumberedLines(output, segments.length);
   return segments.map((segment, index) => ({
-    refined: refinedLines[index] || segment.refined,
-    translation: translationLines[index] || segment.translation,
+    refined: lines[index] || segment.refined,
+    translation: segment.translation,
   }));
 }
 
@@ -704,6 +742,50 @@ async function refineAndTranslateSegments(segments) {
 
 async function refineAndTranslateSegment(segment) {
   return refineAndTranslateSegments([segment]);
+}
+
+async function reviseRecentSegmentsOnce() {
+  const start = Math.max(0, state.segments.length - CONTEXT_SEGMENT_LIMIT);
+  const targetSegments = state.segments.slice(start);
+  if (targetSegments.length < 1) return false;
+
+  const revisedSegments = await reviseContextSegments(targetSegments);
+  let changed = false;
+
+  revisedSegments.forEach((revised, index) => {
+    const segment = targetSegments[index];
+    if (!segment) return;
+
+    const nextRefined = revised.refined || segment.refined;
+    const nextTranslation = revised.translation || segment.translation;
+    segment.pendingTranslation = false;
+    if (nextRefined !== segment.refined || nextTranslation !== segment.translation) {
+      segment.refined = nextRefined;
+      segment.translation = nextTranslation;
+      changed = true;
+    }
+  });
+
+  if (changed) {
+    refreshStructuredPanels();
+    renderHistory();
+  }
+  return changed;
+}
+
+function enqueueFinalContextRevisionAfterStop() {
+  clearTimeout(state.contextTimer);
+  state.contextTimer = null;
+  window.setTimeout(() => {
+    enqueueProcessing(async () => {
+      elements.refineHint.textContent = "停止後の文脈補正を仕上げています...";
+      try {
+        await reviseRecentSegmentsOnce();
+      } catch (error) {
+        elements.refineHint.textContent = error.message;
+      }
+    });
+  }, 0);
 }
 
 function parseNumberedLines(text, expectedCount) {
@@ -765,11 +847,12 @@ function flushRealtimeHistory(options = {}) {
   }
 
   const sourceSentences = splitSourceIntoSentences(sourceText);
+  const targetSentences = splitTargetIntoSentences(translationText);
   const createdSegments = sourceSentences.map((sentence) => ({
     time: new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date()),
     original: sentence,
     refined: sentence,
-    translation: "",
+    translation: targetSentences.shift() || (sourceSentences.length === 1 ? translationText : ""),
     pendingTranslation: true,
   }));
 
@@ -828,11 +911,19 @@ function getRecorderMimeType() {
 function cleanupOpenAIAudio() {
   const recorder = state.openaiAudio?.recorder;
   clearTimeout(state.openaiAudio?.segmentTimer);
+  if (state.openaiAudio) {
+    state.openaiAudio.finalizing = true;
+  }
   if (recorder && recorder.state !== "inactive") {
     recorder.stop();
   }
   state.openaiAudio?.stream?.getTracks().forEach((track) => track.stop());
-  state.openaiAudio = null;
+  const finishingSession = state.openaiAudio;
+  window.setTimeout(() => {
+    if (state.openaiAudio === finishingSession) {
+      state.openaiAudio = null;
+    }
+  }, 0);
   stopAudioMonitor();
   if (state.activeCaptureMode === "openai-audio") {
     state.activeCaptureMode = "";
@@ -854,7 +945,7 @@ function recordNextOpenAIAudioSegment() {
   });
 
   recorder.addEventListener("stop", () => {
-    if (chunks.length && state.listening && state.activeCaptureMode === "openai-audio") {
+    if (chunks.length && (state.listening || session.finalizing)) {
       const audioBlob = new Blob(chunks, { type: recorder.mimeType || session.mimeType || "audio/webm" });
       enqueueProcessing(() => processOpenAIAudioChunk(audioBlob));
     }
@@ -872,7 +963,7 @@ function recordNextOpenAIAudioSegment() {
 }
 
 async function processOpenAIAudioChunk(audioBlob) {
-  if (!audioBlob.size || !state.listening) return;
+  if (!audioBlob.size) return;
   elements.interimText.textContent = "OpenAIで文字起こし中...";
   try {
     const text = await transcribeAudioWithOpenAI(audioBlob);
@@ -1114,32 +1205,13 @@ async function createRealtimeSession(targetLanguage, stream) {
 
 function runContextRevision() {
   state.contextTimer = null;
-  const start = Math.max(0, state.segments.length - CONTEXT_SEGMENT_LIMIT);
-  const targetSegments = state.segments.slice(start);
-  if (targetSegments.length < 1) return;
+  if (state.segments.length < 1) return;
 
   elements.refineHint.textContent = "前後の文脈で再補正中...";
   enqueueProcessing(async () => {
     try {
-      const revisedSegments = await reviseContextSegments(targetSegments);
-      let changed = false;
-
-      revisedSegments.forEach((revised, index) => {
-        const segment = targetSegments[index];
-        if (!segment) return;
-
-        const nextRefined = revised.refined || segment.refined;
-        const nextTranslation = revised.translation || segment.translation;
-        if (nextRefined !== segment.refined || nextTranslation !== segment.translation) {
-          segment.refined = nextRefined;
-          segment.translation = nextTranslation;
-          changed = true;
-        }
-      });
-
+      const changed = await reviseRecentSegmentsOnce();
       if (changed) {
-        refreshStructuredPanels();
-        renderHistory();
         elements.refineHint.textContent = "文脈で再補正しました。";
       } else {
         elements.refineHint.textContent = "";
@@ -1432,7 +1504,8 @@ function stopListening() {
     elements.startBtn.disabled = false;
     elements.stopBtn.disabled = true;
     updateStatus("待機中");
-    elements.refineHint.textContent = "この文章を翻訳に使います。";
+    enqueueFinalContextRevisionAfterStop();
+    showPendingProcessingAfterStop();
     return;
   }
   if (state.activeCaptureMode === "openai-audio" || state.openaiAudio) {
@@ -1442,11 +1515,14 @@ function stopListening() {
     elements.stopBtn.disabled = true;
     updateStatus("待機中");
     elements.interimText.textContent = "";
-    elements.refineHint.textContent = "この文章を翻訳に使います。";
+    enqueueFinalContextRevisionAfterStop();
+    showPendingProcessingAfterStop();
     return;
   }
   flushBufferedTranscript();
   state.recognition?.stop();
+  enqueueFinalContextRevisionAfterStop();
+  showPendingProcessingAfterStop();
 }
 
 function stopForEngineChange() {
