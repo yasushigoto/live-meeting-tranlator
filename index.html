@@ -83,23 +83,42 @@
         </label>
       </section>
 
-      <section class="settings api-settings" id="apiSettings">
-        <label>
-          <span>API接続方式</span>
-          <select id="apiMode">
-            <option value="server">サーバー経由</option>
-            <option value="browser">ブラウザにAPIキーを保存</option>
-          </select>
-        </label>
-        <label id="browserKeyField" hidden>
-          <span>OpenAI API Key</span>
-          <input id="browserApiKey" type="password" autocomplete="off" placeholder="sk-..." />
-        </label>
-        <div class="button-row compact" id="browserKeyActions" hidden>
-          <button id="saveBrowserKeyBtn" type="button">保存</button>
-          <button id="clearBrowserKeyBtn" type="button">削除</button>
-        </div>
-      </section>
+      <div class="settings-row">
+        <section class="settings api-settings" id="apiSettings">
+          <label>
+            <span>API接続方式</span>
+            <select id="apiMode">
+              <option value="server">サーバー経由</option>
+              <option value="browser">ブラウザにAPIキーを保存</option>
+            </select>
+          </label>
+          <label id="browserKeyField" hidden>
+            <span>OpenAI API Key</span>
+            <input id="browserApiKey" type="password" autocomplete="off" placeholder="sk-..." />
+          </label>
+          <div class="button-row compact" id="browserKeyActions" hidden>
+            <button id="saveBrowserKeyBtn" type="button">保存</button>
+            <button id="clearBrowserKeyBtn" type="button">削除</button>
+          </div>
+          <p class="api-note" id="apiNote"></p>
+        </section>
+
+        <section class="settings device-settings">
+          <label>
+            <span>音源入力</span>
+            <select id="audioInputSelect">
+              <option value="">システム既定</option>
+            </select>
+          </label>
+          <div class="button-row compact">
+            <button id="refreshDevicesBtn" type="button">音源を更新</button>
+          </div>
+          <div class="audio-meter" aria-label="Audio input level">
+            <span id="audioLevelBar"></span>
+          </div>
+          <p class="api-note" id="deviceNote">BlackHoleやAggregate Deviceを使う場合は、ここで選択します。</p>
+        </section>
+      </div>
 
       <section class="live-grid" aria-label="Live transcript">
         <article class="panel">
@@ -116,6 +135,18 @@
 
         <article class="panel">
           <div class="panel-head">
+            <h2>速報翻訳</h2>
+            <div class="panel-actions">
+              <button id="copyTranslationBtn" type="button">コピー</button>
+              <span id="targetBadge">en</span>
+            </div>
+          </div>
+          <textarea class="live-text text-area translated" id="translationText" aria-live="polite" readonly></textarea>
+          <p class="interim" id="translationHint">Realtime翻訳がここに表示されます。</p>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
             <h2>文脈補正</h2>
             <div class="panel-actions">
               <button id="copyRefinedBtn" type="button">コピー</button>
@@ -128,14 +159,14 @@
 
         <article class="panel">
           <div class="panel-head">
-            <h2>翻訳</h2>
+            <h2>補正後翻訳</h2>
             <div class="panel-actions">
-              <button id="copyTranslationBtn" type="button">コピー</button>
-              <span id="targetBadge">en</span>
+              <button id="copyRefinedTranslationBtn" type="button">コピー</button>
+              <span id="refinedTargetBadge">ja</span>
             </div>
           </div>
-          <textarea class="live-text text-area translated" id="translationText" aria-live="polite" readonly></textarea>
-          <p class="interim" id="translationHint">翻訳結果がここに表示されます。</p>
+          <textarea class="live-text text-area translated" id="refinedTranslationText" aria-live="polite" readonly></textarea>
+          <p class="interim">補正後の文章を翻訳します。</p>
         </article>
       </section>
 

@@ -5,8 +5,8 @@
   --ink: #18202f;
   --muted: #687386;
   --line: #dbe0e7;
-  --accent: #0f766e;
-  --accent-strong: #0b5f59;
+  --accent: #275ca6;
+  --accent-strong: #1f4b87;
   --warn: #a15c00;
   --shadow: 0 18px 50px rgba(24, 32, 47, 0.09);
 }
@@ -23,7 +23,7 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    linear-gradient(180deg, rgba(15, 118, 110, 0.08), transparent 34rem),
+    linear-gradient(180deg, rgba(39, 92, 166, 0.1), transparent 34rem),
     var(--bg);
   color: var(--ink);
   font-family:
@@ -156,8 +156,54 @@ h2 {
   align-items: end;
 }
 
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(340px, 0.9fr) minmax(460px, 1.35fr);
+  gap: 12px;
+  align-items: start;
+  margin-bottom: 14px;
+}
+
+.settings-row .settings {
+  margin-bottom: 0;
+}
+
+.settings-row:has(#apiSettings[hidden]) {
+  grid-template-columns: 1fr;
+}
+
 .api-settings {
   grid-template-columns: minmax(180px, 0.45fr) minmax(260px, 1fr) auto;
+}
+
+.device-settings {
+  grid-template-columns: minmax(260px, 1fr) auto minmax(140px, 0.3fr);
+}
+
+.api-note {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.audio-meter {
+  position: relative;
+  height: 10px;
+  margin-bottom: 13px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #eef2f6;
+}
+
+.audio-meter span {
+  display: block;
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 90ms linear;
 }
 
 label {
@@ -184,7 +230,7 @@ label span {
 
 .live-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 16px;
 }
@@ -199,7 +245,7 @@ label span {
 }
 
 .panel {
-  min-height: 330px;
+  min-height: 320px;
   display: grid;
   grid-template-rows: auto 1fr auto;
   overflow: hidden;
@@ -251,7 +297,7 @@ label span {
 }
 
 .text-area {
-  min-height: 230px;
+  min-height: 220px;
 }
 
 .refined {
@@ -291,7 +337,7 @@ label span {
   list-style: none;
   margin: 0;
   padding: 12px;
-  max-height: 360px;
+  max-height: 560px;
   overflow: auto;
   display: grid;
   gap: 10px;
@@ -366,6 +412,7 @@ label span {
 
   .controls,
   .settings,
+  .settings-row,
   .live-grid {
     grid-template-columns: 1fr;
   }

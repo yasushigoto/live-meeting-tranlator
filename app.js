@@ -1,9 +1,11 @@
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 const SILENCE_DELAY_MS = 1800;
 const SENTENCE_END_DELAY_MS = 450;
+const REALTIME_FRAGMENT_DELAY_MS = 10000;
 const MAX_BUFFER_MS = 15000;
-const CONTEXT_REVISE_MS = 15000;
+const CONTEXT_REVISE_MS = 10000;
 const CONTEXT_SEGMENT_LIMIT = 6;
+const OPENAI_AUDIO_CHUNK_MS = 2200;
 
 const elements = {
   startBtn: document.querySelector("#startBtn"),
@@ -19,6 +21,7 @@ const elements = {
   browserKeyActions: document.querySelector("#browserKeyActions"),
   saveBrowserKeyBtn: document.querySelector("#saveBrowserKeyBtn"),
   clearBrowserKeyBtn: document.querySelector("#clearBrowserKeyBtn"),
+  apiNote: document.querySelector("#apiNote"),
   libreSettings: document.querySelector("#libreSettings"),
   libreEndpoint: document.querySelector("#libreEndpoint"),
   libreKey: document.querySelector("#libreKey"),
@@ -26,9 +29,11 @@ const elements = {
   statusText: document.querySelector("#statusText"),
   sourceBadge: document.querySelector("#sourceBadge"),
   targetBadge: document.querySelector("#targetBadge"),
+  refinedTargetBadge: document.querySelector("#refinedTargetBadge"),
   transcriptText: document.querySelector("#transcriptText"),
   refinedText: document.querySelector("#refinedText"),
   translationText: document.querySelector("#translationText"),
+  refinedTranslationText: document.querySelector("#refinedTranslationText"),
   interimText: document.querySelector("#interimText"),
   refineHint: document.querySelector("#refineHint"),
   translationHint: document.querySelector("#translationHint"),
@@ -36,9 +41,14 @@ const elements = {
   copyTranscriptBtn: document.querySelector("#copyTranscriptBtn"),
   copyRefinedBtn: document.querySelector("#copyRefinedBtn"),
   copyTranslationBtn: document.querySelector("#copyTranslationBtn"),
+  copyRefinedTranslationBtn: document.querySelector("#copyRefinedTranslationBtn"),
   copyBtn: document.querySelector("#copyBtn"),
   downloadBtn: document.querySelector("#downloadBtn"),
   clearBtn: document.querySelector("#clearBtn"),
+  audioInputSelect: document.querySelector("#audioInputSelect"),
+  refreshDevicesBtn: document.querySelector("#refreshDevicesBtn"),
+  deviceNote: document.querySelector("#deviceNote"),
+  audioLevelBar: document.querySelector("#audioLevelBar"),
   itemTemplate: document.querySelector("#historyItemTemplate"),
 };
 
@@ -57,10 +67,14 @@ const state = {
   realtime: null,
   realtimeSourceBuffer: "",
   realtimeTranslationBuffer: "",
+  realtimeBufferStartedAt: 0,
   realtimeHistoryTimer: null,
   processingQueue: Promise.resolve(),
   translator: null,
   translatorKey: "",
+  audioMonitor: null,
+  activeCaptureMode: "",
+  openaiAudio: null,
 };
 
 const storageKey = "live-meeting-translator-settings";
@@ -75,6 +89,9 @@ function loadSettings() {
   }
   if (!saved.translatorMode || saved.translatorMode === "browser") {
     elements.translatorMode.value = "realtime";
+  }
+  if (location.protocol === "file:" && usesOpenAI()) {
+    elements.apiMode.value = "browser";
   }
   elements.browserApiKey.value = localStorage.getItem(browserApiKeyStorageKey) || "";
   toggleLibreSettings();
@@ -92,6 +109,7 @@ function saveSettings() {
     targetLang: elements.targetLang.value,
     translatorMode: elements.translatorMode.value,
     apiMode: elements.apiMode.value,
+    audioInputId: elements.audioInputSelect.value,
     libreEndpoint: elements.libreEndpoint.value,
     libreKey: elements.libreKey.value,
   };
@@ -106,10 +124,142 @@ function updateStatus(label, active = false) {
 function updateBadges() {
   elements.sourceBadge.textContent = elements.sourceLang.value;
   elements.targetBadge.textContent = elements.targetLang.value;
+  elements.refinedTargetBadge.textContent = elements.targetLang.value;
+}
+
+function updateDeviceModeNote() {
+  if (isRealtimeMode() || elements.translatorMode.value === "openai") return;
+  elements.deviceNote.textContent =
+    "音源選択はOpenAI RealtimeまたはOpenAI APIのときに使えます。他の翻訳エンジンではブラウザ/OSの既定マイクが使われます。";
+}
+
+async function refreshAudioInputs({ requestPermission = false } = {}) {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    elements.deviceNote.textContent = "このブラウザでは音源一覧を取得できません。";
+    return;
+  }
+
+  const currentValue = elements.audioInputSelect.value;
+  if (requestPermission) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+    } catch (error) {
+      elements.deviceNote.textContent = `マイク許可が必要です: ${error.message}`;
+      return;
+    }
+  }
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const audioInputs = devices.filter(
+    (device) => device.kind === "audioinput" && device.deviceId !== "default" && device.deviceId !== "communications",
+  );
+  elements.audioInputSelect.replaceChildren(new Option("システム既定", ""));
+
+  audioInputs.forEach((device, index) => {
+    elements.audioInputSelect.append(new Option(device.label || `音源 ${index + 1}`, device.deviceId));
+  });
+
+  const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
+  const preferredValue = currentValue || (saved.audioInputId === "default" ? "" : saved.audioInputId) || "";
+  if ([...elements.audioInputSelect.options].some((option) => option.value === preferredValue)) {
+    elements.audioInputSelect.value = preferredValue;
+  }
+
+  const selectedLabel = elements.audioInputSelect.selectedOptions[0]?.textContent || "システム既定";
+  elements.deviceNote.textContent = `現在の音源: ${selectedLabel}`;
+  updateDeviceModeNote();
+}
+
+function getSelectedAudioLabel() {
+  return elements.audioInputSelect.selectedOptions[0]?.textContent || "システム既定";
+}
+
+function getAudioConstraints() {
+  const deviceId = elements.audioInputSelect.value;
+  const hasSelectedDevice = Boolean(deviceId);
+  return {
+    audio: {
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      echoCancellation: !hasSelectedDevice,
+      noiseSuppression: !hasSelectedDevice,
+      autoGainControl: !hasSelectedDevice,
+    },
+  };
+}
+
+async function getPreferredAudioStream() {
+  try {
+    return await navigator.mediaDevices.getUserMedia(getAudioConstraints());
+  } catch (error) {
+    if (!elements.audioInputSelect.value) {
+      throw error;
+    }
+
+    throw new Error(`${getSelectedAudioLabel()}を開けませんでした。音源を更新して選び直してください。`);
+  }
+}
+
+function formatAudioError(error) {
+  if (error?.name === "NotAllowedError") {
+    return "マイク使用が許可されていません。ブラウザまたはmacOSのマイク権限を確認してください。";
+  }
+  if (error?.name === "NotFoundError") {
+    return "使用できる音声入力が見つかりません。音源を更新して、BlackHoleやAggregate Deviceを選び直してください。";
+  }
+  if (error?.name === "NotReadableError") {
+    return "音声入力を開けませんでした。ほかのアプリが同じ音源を占有していないか確認してください。";
+  }
+  if (error?.name === "OverconstrainedError") {
+    return "選択した音源を使えませんでした。音源を更新するか、システム既定を選んでください。";
+  }
+  return error?.message || "音声入力を開始できませんでした。";
+}
+
+function stopAudioMonitor() {
+  if (state.audioMonitor?.frameId) {
+    cancelAnimationFrame(state.audioMonitor.frameId);
+  }
+  state.audioMonitor?.context?.close?.();
+  state.audioMonitor = null;
+  if (elements.audioLevelBar) {
+    elements.audioLevelBar.style.width = "0%";
+  }
+}
+
+function startAudioMonitor(stream) {
+  stopAudioMonitor();
+  if (!window.AudioContext && !window.webkitAudioContext) return;
+
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  const context = new AudioContextClass();
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.55;
+
+  const source = context.createMediaStreamSource(stream);
+  source.connect(analyser);
+  const samples = new Uint8Array(analyser.fftSize);
+
+  const tick = () => {
+    analyser.getByteTimeDomainData(samples);
+    let sum = 0;
+    for (const value of samples) {
+      const centered = value - 128;
+      sum += centered * centered;
+    }
+    const rms = Math.sqrt(sum / samples.length);
+    const level = Math.min(100, Math.round((rms / 38) * 100));
+    elements.audioLevelBar.style.width = `${level}%`;
+    state.audioMonitor.frameId = requestAnimationFrame(tick);
+  };
+
+  state.audioMonitor = { context, frameId: requestAnimationFrame(tick) };
 }
 
 function toggleLibreSettings() {
   elements.libreSettings.hidden = elements.translatorMode.value !== "libre";
+  updateDeviceModeNote();
 }
 
 function usesOpenAI() {
@@ -122,9 +272,16 @@ function useBrowserApiKey() {
 
 function toggleApiSettings() {
   elements.apiSettings.hidden = !usesOpenAI();
+  if (location.protocol === "file:" && usesOpenAI()) {
+    elements.apiMode.value = "browser";
+  }
   const showBrowserKey = useBrowserApiKey();
   elements.browserKeyField.hidden = !showBrowserKey;
   elements.browserKeyActions.hidden = !showBrowserKey;
+  elements.apiNote.textContent =
+    location.protocol === "file:" && usesOpenAI()
+      ? "fileで開いているため、OpenAIはブラウザ保存キーで直接接続します。"
+      : "";
 }
 
 function getBrowserApiKey() {
@@ -150,36 +307,148 @@ function clearBrowserApiKey() {
   window.setTimeout(() => updateStatus(state.listening ? "録音中" : "待機中", state.listening), 1200);
 }
 
-function appendLiveText(target, text) {
-  if (!text) return;
-  target.value = target.value ? `${target.value}\n\n${text}` : text;
-  target.scrollTop = target.scrollHeight;
+function formatLiveLines(lines, { newestFirst = false, separator = "\n" } = {}) {
+  const visibleLines = lines.filter(Boolean);
+  return (newestFirst ? [...visibleLines].reverse() : visibleLines).join(separator);
 }
 
-function replaceLiveText(target, lines) {
-  target.value = lines.filter(Boolean).join("\n\n");
-  target.scrollTop = target.scrollHeight;
+function appendLiveText(target, text) {
+  if (!text) return;
+  const shouldStickToBottom = target.scrollTop + target.clientHeight >= target.scrollHeight - 24;
+  target.value = target.value ? `${target.value}\n${text}` : text;
+  if (shouldStickToBottom) {
+    target.scrollTop = target.scrollHeight;
+  }
+}
+
+function replaceLiveText(target, lines, options = {}) {
+  const shouldStickToBottom = target.scrollTop + target.clientHeight >= target.scrollHeight - 24;
+  target.value = formatLiveLines(lines, options);
+  if (shouldStickToBottom) {
+    target.scrollTop = target.scrollHeight;
+  }
+}
+
+function enqueueProcessing(task) {
+  state.processingQueue = state.processingQueue
+    .catch(() => undefined)
+    .then(task)
+    .catch((error) => {
+      elements.refineHint.textContent = error.message || "処理を続行できませんでした。";
+    });
+  return state.processingQueue;
 }
 
 function renderHistoryItem(segment) {
   const fragment = elements.itemTemplate.content.cloneNode(true);
   fragment.querySelector("time").textContent = segment.time;
   fragment.querySelector(".refined span").textContent = segment.refined || "";
-  fragment.querySelector(".translation span").textContent = segment.translation || "翻訳なし";
+  fragment.querySelector(".translation span").textContent = segment.pendingTranslation ? "翻訳中..." : segment.translation || "翻訳なし";
   elements.historyList.prepend(fragment);
 }
 
 function renderHistory() {
   elements.historyList.replaceChildren();
-  for (const segment of [...state.segments].reverse()) {
+  for (const segment of state.segments) {
     renderHistoryItem(segment);
   }
 }
 
+function isTinyRealtimeFragment(sourceText, translationText) {
+  const combined = `${sourceText} ${translationText}`.trim();
+  if (!combined) return true;
+  if (/^[\s、。，．,.!?！？-]+$/.test(combined)) return true;
+  const textForLength = combined.replace(/[\s、。，．,.!?！？-]/g, "");
+  return textForLength.length < 4;
+}
+
+function cleanRealtimeSegmentText(text) {
+  return text
+    .replace(/^\s*[、。，．,.!?！？]+\s*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasLongEnoughRealtimeBuffer(sourceText, translationText) {
+  const sourceWords = sourceText.split(/\s+/).filter(Boolean).length;
+  const textLength = sourceText.replace(/\s/g, "").length;
+  const translationLength = translationText.replace(/\s/g, "").length;
+  return sourceWords >= 14 || textLength >= 80 || translationLength >= 60;
+}
+
+function shouldFlushRealtimeBuffer(sourceText, translationText, { force = false } = {}) {
+  if (!sourceText) return false;
+  if (force) return true;
+  if (looksLikeSentenceEnd(sourceText)) return true;
+  const elapsed = state.realtimeBufferStartedAt ? Date.now() - state.realtimeBufferStartedAt : 0;
+  return elapsed >= MAX_BUFFER_MS && hasLongEnoughRealtimeBuffer(sourceText, translationText);
+}
+
+function appendToLastSegment(sourceText) {
+  const last = state.segments[state.segments.length - 1];
+  if (!last) return false;
+
+  if (sourceText) {
+    last.original = [last.original, sourceText].filter(Boolean).join(" ");
+    last.refined = [last.refined, sourceText].filter(Boolean).join(" ");
+  }
+
+  state.transcript = state.segments.map((segment) => segment.original);
+  refreshStructuredPanels();
+  elements.translationText.dataset.realtimePrefixNeeded = "true";
+  renderHistory();
+  return true;
+}
+
 function appendRealtimeDelta(target, text) {
   if (!text) return;
+  const shouldStickToBottom = target.scrollTop + target.clientHeight >= target.scrollHeight - 24;
+  if (target.value && !target.value.endsWith("\n") && target.dataset.realtimePrefixNeeded === "true") {
+    target.value += "\n";
+    target.dataset.realtimePrefixNeeded = "false";
+  }
   target.value += text;
-  target.scrollTop = target.scrollHeight;
+  if (shouldStickToBottom) {
+    target.scrollTop = target.scrollHeight;
+  }
+}
+
+function getDisplayTranslations() {
+  return state.segments.map((segment) => segment.translation || "");
+}
+
+function shouldPreserveRealtimeTranslation() {
+  return state.activeCaptureMode === "realtime" || Boolean(state.realtime);
+}
+
+function refreshStructuredPanels() {
+  state.refined = state.segments.map((segment) => segment.refined);
+  state.translations = getDisplayTranslations();
+  replaceLiveText(elements.refinedText, state.refined, { newestFirst: true, separator: " " });
+  replaceLiveText(elements.refinedTranslationText, state.translations, { newestFirst: true, separator: " " });
+  if (!shouldPreserveRealtimeTranslation()) {
+    replaceLiveText(elements.translationText, state.translations);
+  }
+}
+
+function splitSourceIntoSentences(text) {
+  const cleaned = cleanRealtimeSegmentText(text);
+  if (!cleaned) return [];
+  const pieces = cleaned.match(/[^。．.!?！？]+[。．.!?！？]+|[^。．.!?！？]+$/g) || [cleaned];
+  return pieces.map((piece) => cleanRealtimeSegmentText(piece)).filter(Boolean);
+}
+
+function getRealtimeTextDelta(event) {
+  return (
+    event.delta ||
+    event.text ||
+    event.transcript ||
+    event.output_text ||
+    event.item?.content?.[0]?.text ||
+    event.item?.content?.[0]?.transcript ||
+    event.response?.output_text ||
+    ""
+  );
 }
 
 function getLangRoot(lang) {
@@ -215,8 +484,8 @@ function looksLikeSentenceEnd(text) {
   if (words.length < 4) return false;
 
   const completeEnglishEndings =
-    /\b(am|is|are|was|were|be|been|being|do|does|did|done|have|has|had|can|could|should|would|will|won't|can't|need|needs|needed|want|wants|wanted|think|thinks|thought|know|knows|knew|agree|agrees|agreed|finish|finished|start|started|confirm|confirmed|share|shared|review|reviewed|approve|approved|decide|decided|discuss|discussed|ship|shipped|launch|launched|go|goes|went|going|ok|okay|right|today|tomorrow|next|later|now|budget|schedule|timeline|deadline|document|proposal|contract|issue|risk|decision|question|meeting|project|customer|client|team|plan|status|update|action|owner|owners|task|tasks)\.?$/i;
-  return completeEnglishEndings.test(normalized);
+    /\b(done|needed|wanted|thought|knew|agreed|finished|started|confirmed|shared|reviewed|approved|decided|discussed|shipped|launched|went|ok|okay|right)\.?$/i;
+  return words.length >= 10 && completeEnglishEndings.test(normalized);
 }
 
 function parseOpenAIOutputText(data) {
@@ -254,6 +523,43 @@ async function fetchOpenAITextTask(systemPrompt, userText) {
   return parseOpenAIOutputText(data);
 }
 
+async function transcribeAudioWithOpenAI(audioBlob) {
+  const source = elements.sourceLang.value;
+  if (useBrowserApiKey()) {
+    const key = getBrowserApiKey();
+    if (!key) throw new Error("OpenAI API Keyを入力してください。");
+
+    const form = new FormData();
+    const extension = audioBlob.type.includes("mp4") ? "m4a" : audioBlob.type.includes("ogg") ? "ogg" : "webm";
+    form.append("file", audioBlob, `audio.${extension}`);
+    form.append("model", "gpt-4o-mini-transcribe");
+    form.append("language", getLangRoot(source));
+
+    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}` },
+      body: form,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error?.message || `OpenAI transcription error (${response.status})`);
+    return data.text || "";
+  }
+
+  const response = await fetch(`/transcribe/openai?source=${encodeURIComponent(source)}`, {
+    method: "POST",
+    headers: { "Content-Type": audioBlob.type || "audio/webm" },
+    body: audioBlob,
+  }).catch(() => {
+    throw new Error("OpenAI API用のローカルサーバーに接続できません。サーバーを再起動してください。");
+  });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 404 || response.status === 405) {
+    throw new Error("OpenAI API用の文字起こし機能を使うには、ローカルサーバーの再起動が必要です。");
+  }
+  if (!response.ok) throw new Error(data.error || `OpenAI文字起こしエラー: ${response.status}`);
+  return data.transcriptText || "";
+}
+
 async function refineText(text) {
   const source = getLangRoot(elements.sourceLang.value);
   if (useBrowserApiKey()) {
@@ -287,9 +593,7 @@ async function reviseContextSegments(segments) {
   const source = getLangRoot(elements.sourceLang.value);
   const target = elements.targetLang.value;
   if (useBrowserApiKey()) {
-    const outputText = await fetchOpenAIContextRevision(segments, source, target);
-    const parsed = JSON.parse(outputText);
-    return Array.isArray(parsed.segments) ? parsed.segments : [];
+    return reviseContextSegmentsInBrowser(segments, source, target);
   }
 
   const response = await fetch("/revise-context", {
@@ -315,107 +619,144 @@ async function reviseContextSegments(segments) {
   return Array.isArray(data.segments) ? data.segments : [];
 }
 
-async function fetchOpenAIContextRevision(segments, source, target) {
-  const key = getBrowserApiKey();
-  if (!key) throw new Error("OpenAI API Keyを入力してください。");
+async function reviseContextSegmentsInBrowser(segments, source, target) {
+  const context = segments
+    .map((segment, index) => `${index + 1}. ${segment.original || segment.refined || ""}`)
+    .join("\n");
+  const refinedBlock = await fetchOpenAITextTask(
+    [
+      `Clean up these live meeting transcript segments in ${source}.`,
+      "Remove filler words, repeated fragments, and obvious recognition errors.",
+      "Preserve meaning, numbers, names, technical and medical terms.",
+      "Return the same number of lines. Format each line as: 1. corrected text",
+      "Do not translate.",
+    ].join(" "),
+    context,
+  );
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-5-mini",
-      input: [
-        {
-          role: "system",
-          content: [
-            `You revise recent meeting transcript segments using nearby context.`,
-            `Source language: ${source}. Target language: ${target}.`,
-            "Improve only obvious context-dependent transcription mistakes, punctuation, capitalization, and translation choices.",
-            "Preserve the number and order of segments. Do not merge or summarize.",
-            "Return valid JSON only: {\"segments\":[{\"refined\":\"...\",\"translation\":\"...\"}]}",
-          ].join(" "),
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            segments: segments.map((segment) => ({
-              original: segment.original,
-              refined: segment.refined,
-              translation: segment.translation,
-            })),
-          }),
-        },
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "context_revision",
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            required: ["segments"],
-            properties: {
-              segments: {
-                type: "array",
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["refined", "translation"],
-                  properties: {
-                    refined: { type: "string" },
-                    translation: { type: "string" },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    }),
-  });
+  const refinedLines = parseNumberedLines(refinedBlock, segments.length);
+  const translatedBlock = await fetchOpenAITextTask(
+    [
+      `Translate these ${source} meeting transcript segments to ${target}.`,
+      "Use the corrected source text. Return the same number of lines.",
+      "Format each line as: 1. translated text",
+    ].join(" "),
+    refinedLines.map((line, index) => `${index + 1}. ${line}`).join("\n"),
+  );
+  const translationLines = parseNumberedLines(translatedBlock, segments.length);
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error?.message || `OpenAI API error (${response.status})`);
-  return parseOpenAIOutputText(data);
+  return segments.map((segment, index) => ({
+    refined: refinedLines[index] || segment.refined,
+    translation: translationLines[index] || segment.translation,
+  }));
+}
+
+async function refineAndTranslateSegments(segments) {
+  if (!segments.length) return;
+  elements.refineHint.textContent = "確定した文を補正中...";
+
+  try {
+    const revisedSegments = await reviseContextSegments(segments);
+    revisedSegments.forEach((revised, index) => {
+      const segment = segments[index];
+      if (!segment) return;
+      segment.refined = revised.refined || basicRefineText(segment.original);
+      segment.translation = revised.translation || segment.translation || "";
+      segment.pendingTranslation = false;
+    });
+  } catch (error) {
+    elements.translationHint.textContent = error.message;
+    segments.forEach((segment) => {
+      segment.refined = basicRefineText(segment.original);
+      segment.pendingTranslation = false;
+    });
+  }
+
+  refreshStructuredPanels();
+  renderHistory();
+  elements.refineHint.textContent = "文脈で再補正しました。";
+}
+
+async function refineAndTranslateSegment(segment) {
+  return refineAndTranslateSegments([segment]);
+}
+
+function parseNumberedLines(text, expectedCount) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\d+[\).:-]?\s*/, "").trim())
+    .filter(Boolean);
+
+  if (lines.length >= expectedCount) return lines.slice(0, expectedCount);
+  if (expectedCount === 1 && text.trim()) return [text.trim().replace(/^\s*\d+[\).:-]?\s*/, "")];
+  return lines;
 }
 
 function scheduleContextRevision() {
-  if (isRealtimeMode()) return;
-  clearTimeout(state.contextTimer);
-  if (state.segments.length < 2) return;
+  if (state.contextTimer) return;
+  if (state.segments.length < 1) return;
+  elements.refineHint.textContent = `${CONTEXT_REVISE_MS / 1000}秒後に文脈補正します...`;
   state.contextTimer = window.setTimeout(runContextRevision, CONTEXT_REVISE_MS);
 }
 
 function scheduleRealtimeHistoryFlush() {
   clearTimeout(state.realtimeHistoryTimer);
+  if (!state.realtimeBufferStartedAt) {
+    state.realtimeBufferStartedAt = Date.now();
+  }
   const candidate = state.realtimeTranslationBuffer.trim();
-  const delay = looksLikeSentenceEnd(candidate) ? SENTENCE_END_DELAY_MS : SILENCE_DELAY_MS;
+  const sourceCandidate = state.realtimeSourceBuffer.trim();
+  const elapsed = Date.now() - state.realtimeBufferStartedAt;
+  const remainingMaxDelay = Math.max(SENTENCE_END_DELAY_MS, MAX_BUFFER_MS - elapsed);
+  const delay = looksLikeSentenceEnd(candidate) || looksLikeSentenceEnd(sourceCandidate) ? SENTENCE_END_DELAY_MS : Math.min(REALTIME_FRAGMENT_DELAY_MS, remainingMaxDelay);
   state.realtimeHistoryTimer = window.setTimeout(flushRealtimeHistory, delay);
 }
 
-function flushRealtimeHistory() {
+function scheduleRealtimeHistoryFlushSoon() {
+  scheduleRealtimeHistoryFlush();
+}
+
+function flushRealtimeHistory(options = {}) {
   clearTimeout(state.realtimeHistoryTimer);
-  const sourceText = basicRefineText(state.realtimeSourceBuffer);
-  const translationText = state.realtimeTranslationBuffer.trim();
+  const sourceText = cleanRealtimeSegmentText(basicRefineText(state.realtimeSourceBuffer));
+  const translationText = cleanRealtimeSegmentText(state.realtimeTranslationBuffer);
+
+  if (!shouldFlushRealtimeBuffer(sourceText, translationText, options)) {
+    scheduleRealtimeHistoryFlush();
+    return;
+  }
+
   state.realtimeSourceBuffer = "";
   state.realtimeTranslationBuffer = "";
+  state.realtimeBufferStartedAt = 0;
 
-  if (!sourceText && !translationText) return;
+  if (!sourceText) return;
+  if (isTinyRealtimeFragment(sourceText, translationText)) {
+    if (!appendToLastSegment(sourceText)) {
+      return;
+    }
+    scheduleContextRevision();
+    return;
+  }
 
-  const segment = {
+  const sourceSentences = splitSourceIntoSentences(sourceText);
+  const createdSegments = sourceSentences.map((sentence) => ({
     time: new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date()),
-    original: sourceText,
-    refined: sourceText,
-    translation: translationText,
-  };
-  state.transcript.push(sourceText);
-  state.refined.push(sourceText);
-  state.translations.push(translationText);
-  state.segments.push(segment);
-  renderHistoryItem(segment);
+    original: sentence,
+    refined: sentence,
+    translation: "",
+    pendingTranslation: true,
+  }));
+
+  for (const segment of createdSegments) {
+    state.transcript.push(segment.original);
+    state.segments.push(segment);
+  }
+  refreshStructuredPanels();
+  elements.translationText.dataset.realtimePrefixNeeded = "true";
+  renderHistory();
+  enqueueProcessing(() => refineAndTranslateSegments(createdSegments));
+  scheduleContextRevision();
 }
 
 function getRealtimeTargetLanguage() {
@@ -431,11 +772,17 @@ function getRealtimeTargetLanguage() {
   return languageMap[elements.targetLang.value] || elements.targetLang.value;
 }
 
+function getRealtimeClientSecret(session) {
+  return session?.client_secret?.value || session?.client_secret || session?.value || "";
+}
+
 function cleanupRealtime() {
   clearTimeout(state.realtimeHistoryTimer);
-  flushRealtimeHistory();
+  flushRealtimeHistory({ force: true });
+  stopAudioMonitor();
 
   if (state.realtime?.audio) {
+    state.realtime.audio.muted = true;
     state.realtime.audio.pause();
     state.realtime.audio.srcObject = null;
   }
@@ -443,23 +790,139 @@ function cleanupRealtime() {
   state.realtime?.pc?.getSenders().forEach((sender) => sender.track?.stop());
   state.realtime?.pc?.close();
   state.realtime = null;
+  if (state.activeCaptureMode === "realtime") {
+    state.activeCaptureMode = "";
+  }
+}
+
+function getRecorderMimeType() {
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+  return candidates.find((type) => window.MediaRecorder?.isTypeSupported?.(type)) || "";
+}
+
+function cleanupOpenAIAudio() {
+  const recorder = state.openaiAudio?.recorder;
+  clearTimeout(state.openaiAudio?.segmentTimer);
+  if (recorder && recorder.state !== "inactive") {
+    recorder.stop();
+  }
+  state.openaiAudio?.stream?.getTracks().forEach((track) => track.stop());
+  state.openaiAudio = null;
+  stopAudioMonitor();
+  if (state.activeCaptureMode === "openai-audio") {
+    state.activeCaptureMode = "";
+  }
+}
+
+function recordNextOpenAIAudioSegment() {
+  const session = state.openaiAudio;
+  if (!state.listening || state.activeCaptureMode !== "openai-audio" || !session?.stream) return;
+
+  const chunks = [];
+  const recorder = new MediaRecorder(session.stream, session.mimeType ? { mimeType: session.mimeType } : undefined);
+  session.recorder = recorder;
+
+  recorder.addEventListener("dataavailable", (event) => {
+    if (event.data?.size) {
+      chunks.push(event.data);
+    }
+  });
+
+  recorder.addEventListener("stop", () => {
+    if (chunks.length && state.listening && state.activeCaptureMode === "openai-audio") {
+      const audioBlob = new Blob(chunks, { type: recorder.mimeType || session.mimeType || "audio/webm" });
+      enqueueProcessing(() => processOpenAIAudioChunk(audioBlob));
+    }
+    if (state.listening && state.activeCaptureMode === "openai-audio") {
+      recordNextOpenAIAudioSegment();
+    }
+  });
+
+  recorder.start();
+  session.segmentTimer = window.setTimeout(() => {
+    if (recorder.state === "recording") {
+      recorder.stop();
+    }
+  }, OPENAI_AUDIO_CHUNK_MS);
+}
+
+async function processOpenAIAudioChunk(audioBlob) {
+  if (!audioBlob.size || !state.listening) return;
+  elements.interimText.textContent = "OpenAIで文字起こし中...";
+  try {
+    const text = await transcribeAudioWithOpenAI(audioBlob);
+    const cleanText = text.trim();
+    if (cleanText) {
+      await handleFinalTranscript(cleanText);
+    }
+    if (state.listening && state.activeCaptureMode === "openai-audio") {
+      elements.interimText.textContent = "OpenAI APIで音声入力中...";
+    }
+  } catch (error) {
+    elements.interimText.textContent = error.message;
+    elements.translationHint.textContent = error.message;
+  }
+}
+
+async function startOpenAIAudioTranscription() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    throw new Error("このブラウザは音声録音に対応していません。");
+  }
+
+  cleanupOpenAIAudio();
+  updateStatus("録音中", true);
+  elements.startBtn.disabled = true;
+  elements.stopBtn.disabled = false;
+  elements.refineHint.textContent = "この文章を翻訳に使います。";
+  elements.translationHint.textContent = "";
+  elements.interimText.textContent = "OpenAI APIで音声入力中...";
+
+  const stream = await getPreferredAudioStream();
+  startAudioMonitor(stream);
+
+  const activeTrack = stream.getAudioTracks()[0];
+  if (activeTrack?.label) {
+    const settings = activeTrack.getSettings?.() || {};
+    const channelText = settings.channelCount ? ` / ${settings.channelCount}ch` : "";
+    const rateText = settings.sampleRate ? ` / ${settings.sampleRate}Hz` : "";
+    elements.deviceNote.textContent = `使用中の音源: ${activeTrack.label}${channelText}${rateText}`;
+  }
+
+  const mimeType = getRecorderMimeType();
+  state.openaiAudio = { recorder: null, stream, mimeType, segmentTimer: null };
+  state.listening = true;
+  state.manualStop = false;
+  state.activeCaptureMode = "openai-audio";
+  recordNextOpenAIAudioSegment();
 }
 
 function handleRealtimeEvent(event) {
-  if (event.type === "session.input_transcript.delta") {
-    state.realtimeSourceBuffer += event.delta || "";
-    appendRealtimeDelta(elements.transcriptText, event.delta || "");
-    appendRealtimeDelta(elements.refinedText, event.delta || "");
+  const delta = getRealtimeTextDelta(event);
+  const lowerType = event.type || "";
+
+  if ((lowerType.includes("input") || lowerType.includes("conversation.item.input")) && lowerType.includes("transcript") && delta) {
+    state.realtimeSourceBuffer += delta;
+    appendRealtimeDelta(elements.transcriptText, delta);
     elements.refineHint.textContent = "Realtime入力を受信中...";
     scheduleRealtimeHistoryFlush();
     return;
   }
 
-  if (event.type === "session.output_transcript.delta") {
-    state.realtimeTranslationBuffer += event.delta || "";
-    appendRealtimeDelta(elements.translationText, event.delta || "");
-    elements.translationHint.textContent = "";
+  if (lowerType.includes("input") && lowerType.includes("completed")) {
+    scheduleRealtimeHistoryFlushSoon();
+    return;
+  }
+
+  if ((lowerType.includes("output") || lowerType.includes("translation") || lowerType.includes("response")) && lowerType.includes("transcript") && delta) {
+    state.realtimeTranslationBuffer += delta;
+    appendRealtimeDelta(elements.translationText, delta);
+    elements.translationHint.textContent = "Realtime翻訳を受信中...";
     scheduleRealtimeHistoryFlush();
+    return;
+  }
+
+  if ((lowerType.includes("output") || lowerType.includes("translation") || lowerType.includes("response")) && lowerType.includes("completed")) {
+    scheduleRealtimeHistoryFlushSoon();
     return;
   }
 
@@ -485,16 +948,23 @@ async function startRealtimeTranslation() {
   elements.refineHint.textContent = "Realtimeセッションを準備中...";
   elements.translationHint.textContent = "マイク許可を待っています...";
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-  });
+  const stream = await getPreferredAudioStream();
+  startAudioMonitor(stream);
+  const activeTrack = stream.getAudioTracks()[0];
+  if (activeTrack?.label) {
+    const selectedLabel = getSelectedAudioLabel();
+    const usingDifferentDevice =
+      elements.audioInputSelect.value && selectedLabel !== "システム既定" && !activeTrack.label.includes(selectedLabel);
+    const settings = activeTrack.getSettings?.() || {};
+    const channelText = settings.channelCount ? ` / ${settings.channelCount}ch` : "";
+    const rateText = settings.sampleRate ? ` / ${settings.sampleRate}Hz` : "";
+    elements.deviceNote.textContent = usingDifferentDevice
+      ? `選択: ${selectedLabel} / 実際: ${activeTrack.label}。ブラウザが別の音源を返しています。`
+      : `使用中の音源: ${activeTrack.label}${channelText}${rateText}`;
+  }
 
   const session = await createRealtimeSession(getRealtimeTargetLanguage(), stream);
-  const clientSecret = session.client_secret?.value || session.client_secret;
+  const clientSecret = getRealtimeClientSecret(session);
   if (!clientSecret) {
     stream.getTracks().forEach((track) => track.stop());
     throw new Error("Realtime client secretを取得できませんでした。");
@@ -504,6 +974,7 @@ async function startRealtimeTranslation() {
   const events = pc.createDataChannel("oai-events");
   const translatedAudio = new Audio();
   translatedAudio.autoplay = true;
+  translatedAudio.muted = true;
 
   pc.ontrack = ({ streams }) => {
     translatedAudio.srcObject = streams[0];
@@ -560,6 +1031,7 @@ async function startRealtimeTranslation() {
   state.realtime = { pc, stream, events, audio: translatedAudio };
   state.listening = true;
   state.manualStop = false;
+  state.activeCaptureMode = "realtime";
 }
 
 async function createRealtimeSession(targetLanguage, stream) {
@@ -616,13 +1088,14 @@ async function createRealtimeSession(targetLanguage, stream) {
 }
 
 function runContextRevision() {
+  state.contextTimer = null;
   const start = Math.max(0, state.segments.length - CONTEXT_SEGMENT_LIMIT);
   const targetSegments = state.segments.slice(start);
-  if (targetSegments.length < 2) return;
+  if (targetSegments.length < 1) return;
 
   elements.refineHint.textContent = "前後の文脈で再補正中...";
-  state.processingQueue = state.processingQueue
-    .then(async () => {
+  enqueueProcessing(async () => {
+    try {
       const revisedSegments = await reviseContextSegments(targetSegments);
       let changed = false;
 
@@ -640,19 +1113,20 @@ function runContextRevision() {
       });
 
       if (changed) {
-        state.refined = state.segments.map((segment) => segment.refined);
-        state.translations = state.segments.map((segment) => segment.translation);
-        replaceLiveText(elements.refinedText, state.refined);
-        replaceLiveText(elements.translationText, state.translations);
+        refreshStructuredPanels();
         renderHistory();
         elements.refineHint.textContent = "文脈で再補正しました。";
       } else {
         elements.refineHint.textContent = "";
       }
-    })
-    .catch((error) => {
+    } catch (error) {
       elements.refineHint.textContent = error.message;
-    });
+    } finally {
+      if (state.listening && state.segments.length > 0) {
+        scheduleContextRevision();
+      }
+    }
+  });
 }
 
 async function getBrowserTranslator(source, target) {
@@ -832,7 +1306,7 @@ function flushBufferedTranscript() {
   state.pendingStartedAt = 0;
   if (!text) return;
 
-  state.processingQueue = state.processingQueue.then(() => handleFinalTranscript(text));
+  enqueueProcessing(() => handleFinalTranscript(text));
 }
 
 function setupRecognition() {
@@ -850,6 +1324,7 @@ function setupRecognition() {
 
   recognition.onstart = () => {
     state.listening = true;
+    state.activeCaptureMode = "speech";
     elements.startBtn.disabled = true;
     elements.stopBtn.disabled = false;
     updateStatus("録音中", true);
@@ -876,6 +1351,9 @@ function setupRecognition() {
 
   recognition.onend = () => {
     state.listening = false;
+    if (state.activeCaptureMode === "speech") {
+      state.activeCaptureMode = "";
+    }
     elements.startBtn.disabled = false;
     elements.stopBtn.disabled = true;
     updateStatus("待機中");
@@ -898,7 +1376,22 @@ function startListening() {
       elements.startBtn.disabled = false;
       elements.stopBtn.disabled = true;
       updateStatus("確認が必要");
-      elements.translationHint.textContent = error.message;
+      const message = formatAudioError(error);
+      elements.translationHint.textContent = message;
+      elements.deviceNote.textContent = message;
+    });
+    return;
+  }
+  if (elements.translatorMode.value === "openai") {
+    startOpenAIAudioTranscription().catch((error) => {
+      cleanupOpenAIAudio();
+      state.listening = false;
+      elements.startBtn.disabled = false;
+      elements.stopBtn.disabled = true;
+      updateStatus("確認が必要");
+      const message = formatAudioError(error);
+      elements.interimText.textContent = message;
+      elements.deviceNote.textContent = message;
     });
     return;
   }
@@ -908,7 +1401,7 @@ function startListening() {
 
 function stopListening() {
   state.manualStop = true;
-  if (isRealtimeMode()) {
+  if (state.activeCaptureMode === "realtime" || state.realtime) {
     cleanupRealtime();
     state.listening = false;
     elements.startBtn.disabled = false;
@@ -917,8 +1410,28 @@ function stopListening() {
     elements.refineHint.textContent = "この文章を翻訳に使います。";
     return;
   }
+  if (state.activeCaptureMode === "openai-audio" || state.openaiAudio) {
+    state.listening = false;
+    cleanupOpenAIAudio();
+    elements.startBtn.disabled = false;
+    elements.stopBtn.disabled = true;
+    updateStatus("待機中");
+    elements.interimText.textContent = "";
+    elements.refineHint.textContent = "この文章を翻訳に使います。";
+    return;
+  }
   flushBufferedTranscript();
   state.recognition?.stop();
+}
+
+function stopForEngineChange() {
+  if (!state.listening && !state.realtime) return;
+  stopListening();
+  updateStatus("再開始が必要");
+  elements.interimText.textContent = "";
+  elements.translationHint.textContent = isRealtimeMode()
+    ? "翻訳エンジンを変更しました。もう一度「開始」を押してください。"
+    : "翻訳エンジンを変更しました。もう一度「開始」を押してください。";
 }
 
 async function translateTypedInput() {
@@ -967,12 +1480,15 @@ function clearHistory() {
   state.pendingStartedAt = 0;
   state.realtimeSourceBuffer = "";
   state.realtimeTranslationBuffer = "";
+  state.realtimeBufferStartedAt = 0;
   clearTimeout(state.flushTimer);
   clearTimeout(state.realtimeHistoryTimer);
   cleanupRealtime();
+  cleanupOpenAIAudio();
   elements.transcriptText.value = "";
   elements.refinedText.value = "";
   elements.translationText.value = "";
+  elements.refinedTranslationText.value = "";
   elements.historyList.replaceChildren();
   elements.interimText.textContent = "";
   elements.refineHint.textContent = "この文章を翻訳に使います。";
@@ -985,11 +1501,24 @@ elements.translateInputBtn.addEventListener("click", translateTypedInput);
 elements.copyTranscriptBtn.addEventListener("click", () => copyText(elements.transcriptText.value));
 elements.copyRefinedBtn.addEventListener("click", () => copyText(elements.refinedText.value));
 elements.copyTranslationBtn.addEventListener("click", () => copyText(elements.translationText.value));
+elements.copyRefinedTranslationBtn.addEventListener("click", () => copyText(elements.refinedTranslationText.value));
 elements.copyBtn.addEventListener("click", copyHistory);
 elements.downloadBtn.addEventListener("click", downloadHistory);
 elements.clearBtn.addEventListener("click", clearHistory);
+elements.refreshDevicesBtn.addEventListener("click", () => refreshAudioInputs({ requestPermission: true }));
+elements.audioInputSelect.addEventListener("change", () => {
+  const selectedLabel = elements.audioInputSelect.selectedOptions[0]?.textContent || "システム既定";
+  elements.deviceNote.textContent = state.listening
+    ? `次回開始時の音源: ${selectedLabel}。反映するには一度停止して開始してください。`
+    : `現在の音源: ${selectedLabel}`;
+  saveSettings();
+});
 
-for (const control of [elements.sourceLang, elements.targetLang, elements.translatorMode, elements.libreEndpoint, elements.libreKey]) {
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", () => refreshAudioInputs());
+}
+
+for (const control of [elements.sourceLang, elements.targetLang, elements.libreEndpoint, elements.libreKey]) {
   control.addEventListener("change", () => {
     toggleLibreSettings();
     toggleApiSettings();
@@ -997,6 +1526,14 @@ for (const control of [elements.sourceLang, elements.targetLang, elements.transl
     saveSettings();
   });
 }
+
+elements.translatorMode.addEventListener("change", () => {
+  stopForEngineChange();
+  toggleLibreSettings();
+  toggleApiSettings();
+  updateBadges();
+  saveSettings();
+});
 
 elements.apiMode.addEventListener("change", () => {
   toggleApiSettings();
@@ -1007,3 +1544,4 @@ elements.clearBrowserKeyBtn.addEventListener("click", clearBrowserApiKey);
 
 loadSettings();
 setupRecognition();
+refreshAudioInputs();

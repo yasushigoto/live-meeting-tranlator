@@ -47,6 +47,12 @@ async function readJson(request) {
   return raw ? JSON.parse(raw) : {};
 }
 
+async function readBuffer(request) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
 async function translate({ text, source, target }) {
   if (!text || !source || !target) {
     throw new Error("翻訳するテキストと言語を指定してください。");
@@ -117,6 +123,38 @@ async function translateWithOpenAI({ text, source, target }) {
       .join("")
       .trim() || ""
   );
+}
+
+async function transcribeWithOpenAI({ audioBuffer, mimeType, source }) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY が設定されていません。");
+  }
+  if (!audioBuffer?.length) {
+    throw new Error("文字起こしする音声がありません。");
+  }
+
+  const form = new FormData();
+  const extension = mimeType.includes("mp4") ? "m4a" : mimeType.includes("ogg") ? "ogg" : "webm";
+  form.append("file", new Blob([audioBuffer], { type: mimeType || "audio/webm" }), `audio.${extension}`);
+  form.append("model", process.env.OPENAI_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe");
+  if (source && source !== "auto") {
+    form.append("language", source.split("-")[0]);
+  }
+
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: form,
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error?.message || `OpenAI transcription error (${response.status})`);
+  }
+
+  return data.text || "";
 }
 
 function basicRefineText(text) {
@@ -335,6 +373,18 @@ const server = http.createServer(async (request, response) => {
       const body = await readJson(request);
       const translatedText = await translateWithOpenAI(body);
       sendJson(response, 200, { translatedText });
+      return;
+    }
+
+    if (request.method === "POST" && request.url.startsWith("/transcribe/openai")) {
+      const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+      const audioBuffer = await readBuffer(request);
+      const transcriptText = await transcribeWithOpenAI({
+        audioBuffer,
+        mimeType: request.headers["content-type"] || "audio/webm",
+        source: requestUrl.searchParams.get("source") || "auto",
+      });
+      sendJson(response, 200, { transcriptText });
       return;
     }
 
