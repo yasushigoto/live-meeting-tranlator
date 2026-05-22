@@ -239,7 +239,9 @@ async function reviseContext({ segments, source, target }) {
           content: [
             `You revise recent meeting transcript segments using nearby context.`,
             `Source language: ${source}. Target language: ${target}.`,
-            "Improve only obvious context-dependent transcription mistakes, punctuation, capitalization, and translation choices.",
+            "For each segment, improve only obvious context-dependent transcription mistakes, punctuation, and capitalization.",
+            "Then translate that corrected source text into the target language.",
+            "Use the source/refined text as the authority. Do not invent missing sentences and do not use prior translations as the source.",
             "Preserve the number and order of segments. Do not merge or summarize.",
             "Return valid JSON only: {\"segments\":[{\"refined\":\"...\",\"translation\":\"...\"}]}",
           ].join(" "),

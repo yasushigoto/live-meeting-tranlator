@@ -467,21 +467,14 @@ function shouldPreserveRealtimeTranslation() {
 function refreshStructuredPanels() {
   state.refined = state.segments.map((segment) => segment.refined);
   state.translations = getDisplayTranslations();
-  replaceLiveText(elements.refinedText, state.refined, { newestFirst: true, separator: " " });
-  replaceLiveText(elements.refinedTranslationText, state.translations, { newestFirst: true, separator: " " });
+  replaceLiveText(elements.refinedText, state.refined, { separator: " " });
+  replaceLiveText(elements.refinedTranslationText, state.translations, { separator: " " });
   if (!shouldPreserveRealtimeTranslation()) {
     replaceLiveText(elements.translationText, state.translations);
   }
 }
 
 function splitSourceIntoSentences(text) {
-  const cleaned = cleanRealtimeSegmentText(text);
-  if (!cleaned) return [];
-  const pieces = cleaned.match(/[^。．.!?！？]+[。．.!?！？]+|[^。．.!?！？]+$/g) || [cleaned];
-  return pieces.map((piece) => cleanRealtimeSegmentText(piece)).filter(Boolean);
-}
-
-function splitTargetIntoSentences(text) {
   const cleaned = cleanRealtimeSegmentText(text);
   if (!cleaned) return [];
   const pieces = cleaned.match(/[^。．.!?！？]+[。．.!?！？]+|[^。．.!?！？]+$/g) || [cleaned];
@@ -681,14 +674,15 @@ async function reviseContextSegments(segments) {
 async function reviseContextSegmentsInBrowser(segments, source, target) {
   const context = segments
     .map((segment, index) =>
-      `${index + 1}. source: ${segment.original || segment.refined || ""}\n   current translation: ${segment.translation || ""}`,
+      `${index + 1}. source: ${segment.original || segment.refined || ""}`,
     )
     .join("\n");
   const output = await fetchOpenAITextTask(
     [
       "Revise live meeting transcript segments using nearby context.",
       `Source language: ${source}. Target language: ${target}.`,
-      "For each segment, clean up recognition errors and translate the corrected text.",
+      "For each segment, clean up recognition errors, then translate that corrected source text.",
+      "Use the source text as the authority. Do not invent missing sentences.",
       "Keep the same number and order of segments. Do not merge or summarize.",
       "Return JSON only: {\"segments\":[{\"refined\":\"...\",\"translation\":\"...\"}]}",
     ].join(" "),
@@ -811,11 +805,10 @@ function scheduleRealtimeHistoryFlush() {
   if (!state.realtimeBufferStartedAt) {
     state.realtimeBufferStartedAt = Date.now();
   }
-  const candidate = state.realtimeTranslationBuffer.trim();
   const sourceCandidate = state.realtimeSourceBuffer.trim();
   const elapsed = Date.now() - state.realtimeBufferStartedAt;
   const remainingMaxDelay = Math.max(SENTENCE_END_DELAY_MS, MAX_BUFFER_MS - elapsed);
-  const delay = looksLikeSentenceEnd(candidate) || looksLikeSentenceEnd(sourceCandidate) ? SENTENCE_END_DELAY_MS : Math.min(REALTIME_FRAGMENT_DELAY_MS, remainingMaxDelay);
+  const delay = looksLikeSentenceEnd(sourceCandidate) ? SENTENCE_END_DELAY_MS : Math.min(REALTIME_FRAGMENT_DELAY_MS, remainingMaxDelay);
   state.realtimeHistoryTimer = window.setTimeout(flushRealtimeHistory, delay);
 }
 
@@ -847,12 +840,11 @@ function flushRealtimeHistory(options = {}) {
   }
 
   const sourceSentences = splitSourceIntoSentences(sourceText);
-  const targetSentences = splitTargetIntoSentences(translationText);
   const createdSegments = sourceSentences.map((sentence) => ({
     time: new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date()),
     original: sentence,
     refined: sentence,
-    translation: targetSentences.shift() || (sourceSentences.length === 1 ? translationText : ""),
+    translation: "",
     pendingTranslation: true,
   }));
 
