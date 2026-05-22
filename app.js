@@ -80,6 +80,14 @@ const state = {
 const storageKey = "live-meeting-translator-settings";
 const browserApiKeyStorageKey = "live-meeting-translator-openai-key";
 
+function isLocalServerPage() {
+  return ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
+}
+
+function shouldForceBrowserApiMode() {
+  return usesOpenAI() && (location.protocol === "file:" || !isLocalServerPage());
+}
+
 function loadSettings() {
   const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
   for (const [key, value] of Object.entries(saved)) {
@@ -90,7 +98,7 @@ function loadSettings() {
   if (!saved.translatorMode || saved.translatorMode === "browser") {
     elements.translatorMode.value = "realtime";
   }
-  if (location.protocol === "file:" && usesOpenAI()) {
+  if (shouldForceBrowserApiMode()) {
     elements.apiMode.value = "browser";
   }
   elements.browserApiKey.value = localStorage.getItem(browserApiKeyStorageKey) || "";
@@ -272,15 +280,15 @@ function useBrowserApiKey() {
 
 function toggleApiSettings() {
   elements.apiSettings.hidden = !usesOpenAI();
-  if (location.protocol === "file:" && usesOpenAI()) {
+  if (shouldForceBrowserApiMode()) {
     elements.apiMode.value = "browser";
   }
   const showBrowserKey = useBrowserApiKey();
   elements.browserKeyField.hidden = !showBrowserKey;
   elements.browserKeyActions.hidden = !showBrowserKey;
   elements.apiNote.textContent =
-    location.protocol === "file:" && usesOpenAI()
-      ? "fileで開いているため、OpenAIはブラウザ保存キーで直接接続します。"
+    shouldForceBrowserApiMode()
+      ? "サーバーなしで開いているため、OpenAIはブラウザ保存キーで直接接続します。"
       : "";
 }
 
