@@ -78,6 +78,7 @@ const state = {
   audioMonitor: null,
   activeCaptureMode: "",
   openaiAudio: null,
+  apiKeyEditorOpen: false,
 };
 
 const storageKey = "live-meeting-translator-settings";
@@ -286,7 +287,7 @@ function toggleApiSettings() {
   if (shouldForceBrowserApiMode()) {
     elements.apiMode.value = "browser";
   }
-  const showBrowserKey = useBrowserApiKey();
+  const showBrowserKey = useBrowserApiKey() && state.apiKeyEditorOpen;
   elements.settingsRow.classList.toggle("key-visible", showBrowserKey);
   elements.apiSettings.classList.toggle("key-visible", showBrowserKey);
   elements.showBrowserKeyActions.hidden = showBrowserKey || !usesOpenAI();
@@ -296,7 +297,7 @@ function toggleApiSettings() {
   elements.apiNote.textContent =
     shouldForceBrowserApiMode()
       ? "サーバーなしで開いているため、OpenAIはブラウザ保存キーで直接接続します。"
-      : showBrowserKey && hasSavedBrowserKey
+      : useBrowserApiKey() && hasSavedBrowserKey
         ? "APIキーはこのブラウザに保存済みです。変更する場合は入力し直して保存してください。"
       : "";
 }
@@ -315,6 +316,8 @@ function saveBrowserApiKey() {
   elements.browserApiKey.value = key;
   elements.apiNote.textContent = "APIキーをこのブラウザに保存しました。";
   elements.translationHint.textContent = "APIキーを保存しました。";
+  state.apiKeyEditorOpen = false;
+  toggleApiSettings();
   updateStatus("APIキー保存済み");
   window.setTimeout(() => updateStatus(state.listening ? "録音中" : "待機中", state.listening), 1200);
 }
@@ -322,7 +325,9 @@ function saveBrowserApiKey() {
 function clearBrowserApiKey() {
   localStorage.removeItem(browserApiKeyStorageKey);
   elements.browserApiKey.value = "";
+  state.apiKeyEditorOpen = true;
   elements.apiNote.textContent = "APIキーを削除しました。";
+  toggleApiSettings();
   updateStatus("APIキー削除済み");
   window.setTimeout(() => updateStatus(state.listening ? "録音中" : "待機中", state.listening), 1200);
 }
@@ -1556,11 +1561,13 @@ elements.translatorMode.addEventListener("change", () => {
 });
 
 elements.apiMode.addEventListener("change", () => {
+  state.apiKeyEditorOpen = false;
   toggleApiSettings();
   saveSettings();
 });
 elements.showBrowserKeyBtn.addEventListener("click", () => {
   elements.apiMode.value = "browser";
+  state.apiKeyEditorOpen = true;
   toggleApiSettings();
   saveSettings();
   elements.browserApiKey.focus();
