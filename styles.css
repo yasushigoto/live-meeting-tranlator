@@ -158,7 +158,7 @@ h2 {
 
 .settings-row {
   display: grid;
-  grid-template-columns: minmax(340px, 0.9fr) minmax(460px, 1.35fr);
+  grid-template-columns: minmax(260px, 0.45fr) minmax(520px, 1fr);
   gap: 12px;
   align-items: start;
   margin-bottom: 14px;
@@ -173,11 +173,15 @@ h2 {
 }
 
 .api-settings {
-  grid-template-columns: minmax(180px, 0.45fr) minmax(260px, 1fr) auto;
+  grid-template-columns: minmax(220px, 1fr);
+}
+
+.api-settings:has(#browserKeyField:not([hidden])) {
+  grid-template-columns: minmax(180px, 0.7fr) minmax(260px, 1fr) auto;
 }
 
 .device-settings {
-  grid-template-columns: minmax(260px, 1fr) auto minmax(140px, 0.3fr);
+  grid-template-columns: minmax(300px, 1fr) auto minmax(140px, 0.24fr);
 }
 
 .api-note {
