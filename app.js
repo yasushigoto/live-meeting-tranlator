@@ -386,6 +386,7 @@ function showPendingProcessingAfterStop() {
 }
 
 function renderHistoryItem(segment) {
+  if (!segment.translation) return;
   const fragment = elements.itemTemplate.content.cloneNode(true);
   const stats = getSegmentStats(segment.original || "");
   const item = fragment.querySelector("li");
@@ -394,12 +395,8 @@ function renderHistoryItem(segment) {
   fragment.querySelector(".segment-meta").textContent =
     stats.words > 1 ? `${stats.words} words` : `${stats.chars} chars`;
   fragment.querySelector(".refined span").textContent = segment.original || "";
-  const translationLabel = segment.pendingTranslation && segment.translation
-    ? `${segment.translation}（翻訳中...）`
-    : segment.pendingTranslation
-      ? "翻訳中..."
-      : segment.translation || "翻訳なし";
-  fragment.querySelector(".translation span").textContent = translationLabel;
+  const translationRow = fragment.querySelector(".translation");
+  translationRow.querySelector("span").textContent = segment.translation;
   elements.historyList.prepend(fragment);
 }
 
@@ -713,8 +710,9 @@ async function summarizeInJapanese() {
     return fetchOpenAITextTask(
       [
         "Summarize the meeting transcript so far in Japanese.",
-        "Focus on decisions, important facts, questions, and action items.",
-        "Do not translate line by line. Use concise bullet points.",
+        "Write naturally without fixed category labels such as decisions, important facts, questions, or action items.",
+        "Use 2 to 5 short Japanese sentences or bullets. Omit empty/none sections.",
+        "Capture the gist and flow of the discussion. Do not translate line by line.",
       ].join(" "),
       transcript,
     );

@@ -146,8 +146,9 @@ async function summarizeWithOpenAI({ text }) {
           role: "system",
           content: [
             "Summarize the meeting transcript so far in Japanese.",
-            "Focus on decisions, important facts, questions, and action items.",
-            "Do not translate line by line. Use concise bullet points.",
+            "Write naturally without fixed category labels such as decisions, important facts, questions, or action items.",
+            "Use 2 to 5 short Japanese sentences or bullets. Omit empty/none sections.",
+            "Capture the gist and flow of the discussion. Do not translate line by line.",
           ].join(" "),
         },
         {
