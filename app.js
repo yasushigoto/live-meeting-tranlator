@@ -14,6 +14,7 @@ const elements = {
   sourceLang: document.querySelector("#sourceLang"),
   targetLang: document.querySelector("#targetLang"),
   translatorMode: document.querySelector("#translatorMode"),
+  settingsRow: document.querySelector("#settingsRow"),
   apiMode: document.querySelector("#apiMode"),
   apiSettings: document.querySelector("#apiSettings"),
   browserKeyField: document.querySelector("#browserKeyField"),
@@ -284,6 +285,8 @@ function toggleApiSettings() {
     elements.apiMode.value = "browser";
   }
   const showBrowserKey = useBrowserApiKey();
+  elements.settingsRow.classList.toggle("key-visible", showBrowserKey);
+  elements.apiSettings.classList.toggle("key-visible", showBrowserKey);
   elements.browserKeyField.hidden = !showBrowserKey;
   elements.browserKeyActions.hidden = !showBrowserKey;
   elements.apiNote.textContent =

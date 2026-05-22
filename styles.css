@@ -168,7 +168,7 @@ h2 {
   margin-bottom: 0;
 }
 
-.settings-row:has(#apiSettings[hidden]) {
+.settings-row.key-visible {
   grid-template-columns: 1fr;
 }
 
@@ -176,8 +176,8 @@ h2 {
   grid-template-columns: minmax(220px, 1fr);
 }
 
-.api-settings:has(#browserKeyField:not([hidden])) {
-  grid-template-columns: minmax(180px, 0.7fr) minmax(260px, 1fr) auto;
+.api-settings.key-visible {
+  grid-template-columns: minmax(180px, 0.7fr) minmax(320px, 1.4fr) auto;
 }
 
 .device-settings {
