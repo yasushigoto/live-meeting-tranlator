@@ -292,9 +292,12 @@ function toggleApiSettings() {
   elements.showBrowserKeyActions.hidden = showBrowserKey || !usesOpenAI();
   elements.browserKeyField.hidden = !showBrowserKey;
   elements.browserKeyActions.hidden = !showBrowserKey;
+  const hasSavedBrowserKey = Boolean(localStorage.getItem(browserApiKeyStorageKey));
   elements.apiNote.textContent =
     shouldForceBrowserApiMode()
       ? "サーバーなしで開いているため、OpenAIはブラウザ保存キーで直接接続します。"
+      : showBrowserKey && hasSavedBrowserKey
+        ? "APIキーはこのブラウザに保存済みです。変更する場合は入力し直して保存してください。"
       : "";
 }
 
@@ -310,6 +313,8 @@ function saveBrowserApiKey() {
   }
   localStorage.setItem(browserApiKeyStorageKey, key);
   elements.browserApiKey.value = key;
+  elements.apiNote.textContent = "APIキーをこのブラウザに保存しました。";
+  elements.translationHint.textContent = "APIキーを保存しました。";
   updateStatus("APIキー保存済み");
   window.setTimeout(() => updateStatus(state.listening ? "録音中" : "待機中", state.listening), 1200);
 }
@@ -317,6 +322,7 @@ function saveBrowserApiKey() {
 function clearBrowserApiKey() {
   localStorage.removeItem(browserApiKeyStorageKey);
   elements.browserApiKey.value = "";
+  elements.apiNote.textContent = "APIキーを削除しました。";
   updateStatus("APIキー削除済み");
   window.setTimeout(() => updateStatus(state.listening ? "録音中" : "待機中", state.listening), 1200);
 }
