@@ -49,6 +49,7 @@ const elements = {
   copyRefinedBtn: document.querySelector("#copyRefinedBtn"),
   copyTranslationBtn: document.querySelector("#copyTranslationBtn"),
   copyRefinedTranslationBtn: document.querySelector("#copyRefinedTranslationBtn"),
+  copyAllBtn: document.querySelector("#copyAllBtn"),
   copyBtn: document.querySelector("#copyBtn"),
   downloadBtn: document.querySelector("#downloadBtn"),
   clearBtn: document.querySelector("#clearBtn"),
@@ -85,6 +86,7 @@ const state = {
   apiKeyEditorOpen: false,
   audioInputTouched: false,
   summaryText: "",
+  summaries: [],
   lastSummarySegmentCount: 0,
 };
 
@@ -790,9 +792,11 @@ async function runSummaryUpdate({ final = false } = {}) {
     const summary = cleanSummaryText(await summarizeInJapanese());
     if (summary) {
       const stamp = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
-      state.summaryText = `[${stamp}]\n${summary}`;
+      state.summaries.push({ time: stamp, text: summary });
+      state.summaryText = state.summaries.map((item) => `[${item.time}]\n${item.text}`).join("\n\n");
       state.lastSummarySegmentCount = state.segments.length;
       elements.refinedText.value = state.summaryText;
+      elements.refinedText.scrollTop = elements.refinedText.scrollHeight;
       elements.refineHint.textContent = final ? "最後の要約を表示しました。" : "ここまでの要約を更新しました。";
     }
   } catch (error) {
@@ -1523,6 +1527,28 @@ function buildExportText() {
     .join("\n\n");
 }
 
+function buildRecordingText() {
+  const transcript = elements.transcriptText.value.trim() || state.transcript.join("\n");
+  const translation = elements.translationText.value.trim();
+  const summary = state.summaryText.trim();
+  const pairedHistory = buildExportText();
+  const sections = [
+    ["文字起こし", transcript],
+    ["日本語訳", translation],
+    ["要約", summary],
+    ["対訳", pairedHistory],
+  ];
+
+  return sections
+    .filter(([, content]) => content?.trim())
+    .map(([title, content]) => `# ${title}\n${content.trim()}`)
+    .join("\n\n");
+}
+
+async function copyRecording() {
+  await copyText(buildRecordingText());
+}
+
 function downloadHistory() {
   const blob = new Blob([buildExportText()], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -1544,6 +1570,7 @@ function clearHistory() {
   state.realtimeTranslationBuffer = "";
   state.realtimeBufferStartedAt = 0;
   state.summaryText = "";
+  state.summaries = [];
   state.lastSummarySegmentCount = 0;
   clearTimeout(state.flushTimer);
   clearTimeout(state.realtimeHistoryTimer);
@@ -1569,6 +1596,7 @@ elements.copyTranscriptBtn.addEventListener("click", () => copyText(elements.tra
 elements.copyRefinedBtn.addEventListener("click", () => copyText(elements.refinedText.value));
 elements.copyTranslationBtn.addEventListener("click", () => copyText(elements.translationText.value));
 elements.copyRefinedTranslationBtn?.addEventListener("click", () => copyText(elements.refinedTranslationText.value));
+elements.copyAllBtn.addEventListener("click", copyRecording);
 elements.copyBtn.addEventListener("click", copyHistory);
 elements.downloadBtn.addEventListener("click", downloadHistory);
 elements.clearBtn.addEventListener("click", clearHistory);
