@@ -90,6 +90,17 @@ input {
   margin-bottom: 22px;
 }
 
+.top-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.top-actions button {
+  min-height: 38px;
+}
+
 .eyebrow {
   margin: 0 0 5px;
   color: var(--accent);
