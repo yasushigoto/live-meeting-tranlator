@@ -83,6 +83,7 @@ const state = {
   activeCaptureMode: "",
   openaiAudio: null,
   apiKeyEditorOpen: false,
+  audioInputTouched: false,
   summaryText: "",
   lastSummarySegmentCount: 0,
 };
@@ -150,7 +151,11 @@ function updateBadges() {
 function updateDeviceModeNote() {
   if (isRealtimeMode() || elements.translatorMode.value === "openai") return;
   elements.deviceNote.textContent =
-    "音源選択はOpenAI RealtimeまたはOpenAI APIのときに使えます。Macの出力先ではなく、入力として見えている音源だけ選べます。";
+    "会議音声は通常BlackHoleを使います。他の翻訳エンジンではブラウザ/OSの既定マイクが使われます。";
+}
+
+function findBlackHoleOption() {
+  return [...elements.audioInputSelect.options].find((option) => /blackhole/i.test(option.textContent || ""));
 }
 
 async function refreshAudioInputs({ requestPermission = false } = {}) {
@@ -181,7 +186,11 @@ async function refreshAudioInputs({ requestPermission = false } = {}) {
   });
 
   const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
-  const preferredValue = currentValue || (saved.audioInputId === "default" ? "" : saved.audioInputId) || "";
+  const blackHoleOption = findBlackHoleOption();
+  const preferredValue =
+    !state.audioInputTouched && blackHoleOption
+      ? blackHoleOption.value
+      : currentValue || (saved.audioInputId === "default" ? "" : saved.audioInputId) || "";
   if ([...elements.audioInputSelect.options].some((option) => option.value === preferredValue)) {
     elements.audioInputSelect.value = preferredValue;
   }
@@ -189,9 +198,12 @@ async function refreshAudioInputs({ requestPermission = false } = {}) {
   const selectedLabel = elements.audioInputSelect.selectedOptions[0]?.textContent || "システム既定";
   elements.deviceNote.textContent =
     audioInputs.length
-      ? `現在の音源: ${selectedLabel}`
+      ? blackHoleOption
+        ? `会議音声入力: ${selectedLabel}。通常はBlackHoleを選びます。`
+        : `現在の音源: ${selectedLabel}。BlackHoleが見つかりません。`
       : "入力音源がまだ見えていません。音源を更新してマイクを許可してください。Macの出力先だけでは表示されません。";
   updateDeviceModeNote();
+  saveSettings();
 }
 
 function getSelectedAudioLabel() {
@@ -1562,6 +1574,7 @@ elements.downloadBtn.addEventListener("click", downloadHistory);
 elements.clearBtn.addEventListener("click", clearHistory);
 elements.refreshDevicesBtn.addEventListener("click", () => refreshAudioInputs({ requestPermission: true }));
 elements.audioInputSelect.addEventListener("change", () => {
+  state.audioInputTouched = true;
   const selectedLabel = elements.audioInputSelect.selectedOptions[0]?.textContent || "システム既定";
   elements.deviceNote.textContent = state.listening
     ? `次回開始時の音源: ${selectedLabel}。反映するには一度停止して開始してください。`
