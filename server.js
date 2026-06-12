@@ -368,8 +368,8 @@ async function createRealtimeTranslationSession({ targetLanguage }) {
         model: process.env.OPENAI_REALTIME_TRANSLATION_MODEL || "gpt-realtime-translate",
         audio: {
           input: {
-            transcription: { model: process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL || "gpt-realtime-whisper" },
-            noise_reduction: { type: "near_field" },
+            transcription: null,
+            noise_reduction: null,
           },
           output: {
             language: normalizeRealtimeTargetLanguage(targetLanguage),
@@ -384,6 +384,42 @@ async function createRealtimeTranslationSession({ targetLanguage }) {
     throw new Error(data.error?.message || `OpenAI Realtime error (${response.status})`);
   }
 
+  return data;
+}
+
+async function createRealtimeTranscriptionSession({ sourceLanguage }) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY が設定されていません。");
+  }
+
+  const language = String(sourceLanguage || "en").split("-")[0];
+  const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      session: {
+        type: "transcription",
+        audio: {
+          input: {
+            transcription: {
+              model: process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL || "gpt-realtime-whisper",
+              language,
+              delay: "low",
+            },
+            noise_reduction: null,
+          },
+        },
+      },
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error?.message || `OpenAI Realtime transcription error (${response.status})`);
+  }
   return data;
 }
 
@@ -465,6 +501,13 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "POST" && request.url === "/realtime-translation/session") {
       const body = await readJson(request);
       const session = await createRealtimeTranslationSession(body);
+      sendJson(response, 200, session);
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/realtime-transcription/session") {
+      const body = await readJson(request);
+      const session = await createRealtimeTranscriptionSession(body);
       sendJson(response, 200, session);
       return;
     }
