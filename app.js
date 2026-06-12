@@ -10,6 +10,10 @@ const HISTORY_TIMED_FLUSH_MS = 6500;
 const HISTORY_HARD_FLUSH_MS = 12000;
 const SUMMARY_INTERVAL_MS = 60000;
 const OPENAI_AUDIO_CHUNK_MS = 2200;
+const REALTIME_TRANSCRIPT_TIMEOUT_MS = 8000;
+const REALTIME_TRANSCRIPTION_SILENCE_MS = 700;
+const REALTIME_TRANSCRIPTION_MAX_CHUNK_MS = 8000;
+const REALTIME_TRANSCRIPTION_MIN_CHUNK_MS = 900;
 
 const elements = {
   startBtn: document.querySelector("#startBtn"),
@@ -58,6 +62,11 @@ const elements = {
   deviceNote: document.querySelector("#deviceNote"),
   audioLevelBar: document.querySelector("#audioLevelBar"),
   itemTemplate: document.querySelector("#historyItemTemplate"),
+  apiKeyDialog: document.querySelector("#apiKeyDialog"),
+  dialogApiKey: document.querySelector("#dialogApiKey"),
+  dialogApiKeyError: document.querySelector("#dialogApiKeyError"),
+  cancelApiKeyBtn: document.querySelector("#cancelApiKeyBtn"),
+  confirmApiKeyBtn: document.querySelector("#confirmApiKeyBtn"),
 };
 
 const state = {
@@ -73,10 +82,15 @@ const state = {
   flushTimer: null,
   summaryTimer: null,
   realtime: null,
+  realtimeTranscription: null,
   realtimeSourceBuffer: "",
   realtimeTranslationBuffer: "",
   realtimeBufferStartedAt: 0,
   realtimeHistoryTimer: null,
+  realtimeTranscriptTimer: null,
+  realtimeTranscriptReceived: false,
+  realtimeLastSourceAt: 0,
+  realtimeLastOutputAt: 0,
   processingQueue: Promise.resolve(),
   translator: null,
   translatorKey: "",
@@ -312,13 +326,14 @@ function toggleApiSettings() {
   if (shouldForceBrowserApiMode()) {
     elements.apiMode.value = "browser";
   }
-  const showBrowserKey = useBrowserApiKey() && state.apiKeyEditorOpen;
-  elements.settingsRow.classList.toggle("key-visible", showBrowserKey);
-  elements.apiSettings.classList.toggle("key-visible", showBrowserKey);
-  elements.showBrowserKeyActions.hidden = showBrowserKey || !usesOpenAI();
-  elements.browserKeyField.hidden = !showBrowserKey;
-  elements.browserKeyActions.hidden = !showBrowserKey;
+  const showBrowserKeyButton = useBrowserApiKey();
+  elements.settingsRow.classList.remove("key-visible");
+  elements.apiSettings.classList.remove("key-visible");
+  elements.showBrowserKeyActions.hidden = !showBrowserKeyButton;
+  elements.browserKeyField.hidden = true;
+  elements.browserKeyActions.hidden = true;
   const hasSavedBrowserKey = Boolean(localStorage.getItem(browserApiKeyStorageKey));
+  elements.showBrowserKeyBtn.textContent = hasSavedBrowserKey ? "APIキー変更" : "APIキー設定";
   elements.apiNote.textContent =
     shouldForceBrowserApiMode()
       ? "サーバーなしで開いているため、OpenAIはブラウザ保存キーで直接接続します。"
@@ -329,6 +344,30 @@ function toggleApiSettings() {
 
 function getBrowserApiKey() {
   return elements.browserApiKey.value.trim() || localStorage.getItem(browserApiKeyStorageKey) || "";
+}
+
+function promptAndSaveBrowserApiKey() {
+  elements.dialogApiKey.value = "";
+  elements.dialogApiKeyError.textContent = "";
+  elements.apiKeyDialog.showModal();
+  window.setTimeout(() => elements.dialogApiKey.focus(), 0);
+}
+
+function saveDialogApiKey() {
+  const key = elements.dialogApiKey.value.trim();
+  if (!key) {
+    elements.dialogApiKeyError.textContent = "APIキーを入力してください。";
+    return;
+  }
+
+  localStorage.setItem(browserApiKeyStorageKey, key);
+  elements.browserApiKey.value = "";
+  elements.apiNote.textContent = "APIキーをこのブラウザに保存しました。";
+  elements.translationHint.textContent = "APIキーを保存しました。";
+  elements.apiKeyDialog.close();
+  toggleApiSettings();
+  updateStatus("APIキー保存済み");
+  window.setTimeout(() => updateStatus(state.listening ? "録音中" : "待機中", state.listening), 1200);
 }
 
 function saveBrowserApiKey() {
@@ -886,6 +925,7 @@ function getRealtimeClientSecret(session) {
 
 function cleanupRealtime() {
   clearTimeout(state.realtimeHistoryTimer);
+  clearTimeout(state.realtimeTranscriptTimer);
   flushRealtimeHistory({ force: true });
   stopAudioMonitor();
 
@@ -897,7 +937,13 @@ function cleanupRealtime() {
   state.realtime?.stream?.getTracks().forEach((track) => track.stop());
   state.realtime?.pc?.getSenders().forEach((sender) => sender.track?.stop());
   state.realtime?.pc?.close();
+  state.realtimeTranscription?.pc?.close();
+  if (state.realtimeTranscription?.frameId) {
+    cancelAnimationFrame(state.realtimeTranscription.frameId);
+  }
+  state.realtimeTranscription?.context?.close?.();
   state.realtime = null;
+  state.realtimeTranscription = null;
   if (state.activeCaptureMode === "realtime") {
     state.activeCaptureMode = "";
   }
@@ -1018,6 +1064,9 @@ function handleRealtimeEvent(event) {
   const lowerType = event.type || "";
 
   if ((lowerType.includes("input") || lowerType.includes("conversation.item.input")) && lowerType.includes("transcript") && delta) {
+    state.realtimeTranscriptReceived = true;
+    state.realtimeLastSourceAt = Date.now();
+    clearTimeout(state.realtimeTranscriptTimer);
     state.realtimeSourceBuffer += delta;
     appendRealtimeDelta(elements.transcriptText, delta);
     elements.refineHint.textContent = "ここまでの要約を準備中...";
@@ -1031,6 +1080,7 @@ function handleRealtimeEvent(event) {
   }
 
   if ((lowerType.includes("output") || lowerType.includes("translation") || lowerType.includes("response")) && lowerType.includes("transcript") && delta) {
+    state.realtimeLastOutputAt = Date.now();
     state.realtimeTranslationBuffer += delta;
     appendRealtimeDelta(elements.translationText, delta);
     elements.translationHint.textContent = "Realtime翻訳を受信中...";
@@ -1050,7 +1100,145 @@ function handleRealtimeEvent(event) {
 
   if (event.type === "error") {
     elements.translationHint.textContent = event.error?.message || "Realtime APIエラー";
+    return;
   }
+
+  if (event.type === "session.closed" && !state.manualStop) {
+    updateStatus("再接続が必要");
+    elements.translationHint.textContent = "Realtimeセッションが終了しました。停止してから再度開始してください。";
+  }
+}
+
+function handleRealtimeTranscriptionEvent(event) {
+  if (event.type === "conversation.item.input_audio_transcription.delta" && event.delta) {
+    state.realtimeTranscriptReceived = true;
+    state.realtimeLastSourceAt = Date.now();
+    clearTimeout(state.realtimeTranscriptTimer);
+    state.realtimeSourceBuffer += event.delta;
+    appendRealtimeDelta(elements.transcriptText, event.delta);
+    elements.interimText.textContent = "Realtime文字起こし中...";
+    elements.refineHint.textContent = "ここまでの要約を準備中...";
+    scheduleRealtimeHistoryFlush();
+    return;
+  }
+
+  if (event.type === "conversation.item.input_audio_transcription.completed") {
+    scheduleRealtimeHistoryFlushSoon();
+    return;
+  }
+
+  if (event.type === "conversation.item.input_audio_transcription.failed" || event.type === "error") {
+    elements.interimText.textContent =
+      event.error?.message || event.transcription_error?.message || "Realtime文字起こしでエラーが発生しました。";
+  }
+}
+
+async function startRealtimeTranscription(stream) {
+  const session = await createRealtimeTranscriptionSession(getLangRoot(elements.sourceLang.value));
+  const clientSecret = getRealtimeClientSecret(session);
+  if (!clientSecret) throw new Error("Realtime文字起こし用のclient secretを取得できませんでした。");
+
+  const pc = new RTCPeerConnection();
+  const events = pc.createDataChannel("oai-events");
+  const transcriptionState = {
+    pc,
+    events,
+    context: null,
+    frameId: null,
+    speechStartedAt: 0,
+    lastSpeechAt: 0,
+    chunkStartedAt: 0,
+  };
+  state.realtimeTranscription = transcriptionState;
+
+  events.addEventListener("message", ({ data }) => {
+    try {
+      handleRealtimeTranscriptionEvent(JSON.parse(data));
+    } catch {
+      elements.interimText.textContent = "Realtime文字起こしイベントを読み取れませんでした。";
+    }
+  });
+
+  events.addEventListener("open", () => {
+    elements.interimText.textContent = "Realtime文字起こしを待っています...";
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+
+    const context = new AudioContextClass();
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    context.createMediaStreamSource(stream).connect(analyser);
+    const samples = new Uint8Array(analyser.fftSize);
+    transcriptionState.context = context;
+
+    const commit = () => {
+      if (events.readyState !== "open" || !transcriptionState.speechStartedAt) return;
+      events.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+      transcriptionState.speechStartedAt = 0;
+      transcriptionState.lastSpeechAt = 0;
+      transcriptionState.chunkStartedAt = 0;
+    };
+
+    const monitor = () => {
+      analyser.getByteTimeDomainData(samples);
+      let sum = 0;
+      for (const value of samples) {
+        const centered = value - 128;
+        sum += centered * centered;
+      }
+      const rms = Math.sqrt(sum / samples.length);
+      const now = Date.now();
+      const speaking = rms >= 2.2;
+
+      if (speaking) {
+        if (!transcriptionState.speechStartedAt) {
+          transcriptionState.speechStartedAt = now;
+          transcriptionState.chunkStartedAt = now;
+        }
+        transcriptionState.lastSpeechAt = now;
+      }
+
+      const chunkDuration = transcriptionState.chunkStartedAt ? now - transcriptionState.chunkStartedAt : 0;
+      const silenceDuration = transcriptionState.lastSpeechAt ? now - transcriptionState.lastSpeechAt : 0;
+      if (
+        transcriptionState.speechStartedAt &&
+        chunkDuration >= REALTIME_TRANSCRIPTION_MIN_CHUNK_MS &&
+        (silenceDuration >= REALTIME_TRANSCRIPTION_SILENCE_MS ||
+          chunkDuration >= REALTIME_TRANSCRIPTION_MAX_CHUNK_MS)
+      ) {
+        commit();
+      }
+
+      transcriptionState.frameId = requestAnimationFrame(monitor);
+    };
+
+    transcriptionState.frameId = requestAnimationFrame(monitor);
+  });
+
+  for (const track of stream.getAudioTracks()) {
+    pc.addTrack(track, stream);
+  }
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${clientSecret}`,
+      "Content-Type": "application/sdp",
+    },
+    body: offer.sdp,
+  });
+
+  if (!sdpResponse.ok) {
+    pc.close();
+    throw new Error((await sdpResponse.text()) || `Realtime文字起こし接続エラー: ${sdpResponse.status}`);
+  }
+
+  await pc.setRemoteDescription({
+    type: "answer",
+    sdp: await sdpResponse.text(),
+  });
 }
 
 async function startRealtimeTranslation() {
@@ -1080,6 +1268,7 @@ async function startRealtimeTranslation() {
       : `使用中の音源: ${activeTrack.label}${channelText}${rateText}`;
   }
 
+  const transcriptionPromise = startRealtimeTranscription(stream);
   const session = await createRealtimeSession(getRealtimeTargetLanguage(), stream);
   const clientSecret = getRealtimeClientSecret(session);
   if (!clientSecret) {
@@ -1108,7 +1297,15 @@ async function startRealtimeTranslation() {
   events.addEventListener("open", () => {
     updateStatus("Realtime中", true);
     elements.refineHint.textContent = "1分くらいの間隔で要約します。";
-    elements.translationHint.textContent = "";
+    elements.translationHint.textContent = "音声を待っています...";
+    state.realtimeTranscriptReceived = false;
+    clearTimeout(state.realtimeTranscriptTimer);
+    state.realtimeTranscriptTimer = window.setTimeout(() => {
+      if (!state.realtimeTranscriptReceived && state.activeCaptureMode === "realtime") {
+        elements.interimText.textContent =
+          "翻訳は動作していますが、Realtime原文文字起こしが届いていません。原文は翻訳より遅れる場合があります。";
+      }
+    }, REALTIME_TRANSCRIPT_TIMEOUT_MS);
   });
 
   pc.addEventListener("connectionstatechange", () => {
@@ -1149,6 +1346,9 @@ async function startRealtimeTranslation() {
   state.listening = true;
   state.manualStop = false;
   state.activeCaptureMode = "realtime";
+  state.realtimeLastSourceAt = Date.now();
+  state.realtimeLastOutputAt = 0;
+  await transcriptionPromise;
   scheduleSummaryUpdate();
 }
 
@@ -1158,8 +1358,8 @@ async function createRealtimeSession(targetLanguage, stream) {
       model: "gpt-realtime-translate",
       audio: {
         input: {
-          transcription: { model: "gpt-realtime-whisper" },
-          noise_reduction: { type: "near_field" },
+          transcription: null,
+          noise_reduction: null,
         },
         output: { language: targetLanguage },
       },
@@ -1203,6 +1403,51 @@ async function createRealtimeSession(targetLanguage, stream) {
   }
 
   return sessionResponse.json();
+}
+
+async function createRealtimeTranscriptionSession(sourceLanguage) {
+  const payload = {
+    session: {
+      type: "transcription",
+      audio: {
+        input: {
+          transcription: {
+            model: "gpt-realtime-whisper",
+            language: sourceLanguage,
+            delay: "low",
+          },
+          noise_reduction: null,
+        },
+      },
+    },
+  };
+
+  if (useBrowserApiKey()) {
+    const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${getBrowserApiKey()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error?.message || `Realtime文字起こしセッション作成エラー: ${response.status}`);
+    }
+    return data;
+  }
+
+  const response = await fetch("/realtime-transcription/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sourceLanguage }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || `Realtime文字起こしセッション作成エラー: ${response.status}`);
+  }
+  return data;
 }
 
 async function getBrowserTranslator(source, target) {
@@ -1432,6 +1677,11 @@ function startListening() {
   saveSettings();
   updateBadges();
   state.manualStop = false;
+  if (useBrowserApiKey() && !getBrowserApiKey()) {
+    promptAndSaveBrowserApiKey();
+    updateStatus("APIキーが必要");
+    return;
+  }
   if (isRealtimeMode()) {
     startRealtimeTranslation().catch((error) => {
       cleanupRealtime();
@@ -1632,16 +1882,22 @@ elements.translatorMode.addEventListener("change", () => {
 });
 
 elements.apiMode.addEventListener("change", () => {
-  state.apiKeyEditorOpen = false;
   toggleApiSettings();
   saveSettings();
 });
 elements.showBrowserKeyBtn.addEventListener("click", () => {
   elements.apiMode.value = "browser";
-  state.apiKeyEditorOpen = true;
   toggleApiSettings();
   saveSettings();
-  elements.browserApiKey.focus();
+  promptAndSaveBrowserApiKey();
+});
+elements.cancelApiKeyBtn.addEventListener("click", () => elements.apiKeyDialog.close());
+elements.confirmApiKeyBtn.addEventListener("click", saveDialogApiKey);
+elements.dialogApiKey.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    saveDialogApiKey();
+  }
 });
 elements.saveBrowserKeyBtn.addEventListener("click", saveBrowserApiKey);
 elements.clearBrowserKeyBtn.addEventListener("click", clearBrowserApiKey);
